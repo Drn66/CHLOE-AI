@@ -1,0 +1,100 @@
+# ── CHLOE AI — local data that must never be published ──────────────────────
+# Everything listed here is created by the app on first run. A fresh clone with
+# none of it present boots straight to the setup screen, which is the intended
+# first experience — so nothing here needs to be committed, and some of it must
+# never be.
+
+# ── Secrets. Committing any of these publishes them. ──────────────────────────
+# Only source, the bundled icon and the safe example belong in config/.
+# Keep comments on separate lines: Git does not support inline comments here.
+/config/*
+!/config/__init__.py
+!/config/jarvis.ico
+!/config/api_keys.example.json
+# Explicit rules also protect nested copies and exported credentials.
+**/api_keys.json
+**/token*.json
+**/client_secret*.json
+*credentials*.json
+*service-account*.json
+*service_account*.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+id_ed25519*
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# ── Personal data the assistant accumulates about you ─────────────────────────
+memory/*.json
+memory/*.jsonl
+memory/*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# ── Python build noise ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+node_modules/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Editors and operating systems ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+*.local
+*.bak
+*.tmp
+*~
+
+# ── Runtime output ────────────────────────────────────────────────────────────
+*.log
+logs/
+downloads/
+screenshots/
+uploads/
+recordings/
+backups/
+.jarvis_profiles/
+.playwright/
+playwright-report/
+test-results/
+
+# Protect nested personal data and certificate copies.
+/memory/*
+!/memory/*.py
+*.crt
+*.cer
+*.der
+*.p7b
+*.p7c
+*.jks
+*.db
+*.jsonl
