@@ -31,7 +31,7 @@ class ChatView(QTextEdit):
         self.setAccessibleName("Conversa com CHLOE AI")
         self.setFont(QFont("Segoe UI", 11))
         self.setStyleSheet(f"""
-            QTextEdit {{ background: {C.DARK}; color: {C.TEXT}; border: none; padding: 14px; }}
+            QTextEdit {{ background: {C.DARK}; color: {C.TEXT}; border: none; padding: 4px; }}
             QScrollBar:vertical {{ background: {C.DARK}; width: 8px; }}
             QScrollBar::handle:vertical {{ background: {C.BORDER_B}; border-radius: 4px; min-height: 32px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
@@ -39,11 +39,7 @@ class ChatView(QTextEdit):
         self.document().setMaximumBlockCount(600)
         self._ai_name_lc = "chloe ai"
         self._empty = True
-        self.setHtml(f'<p style="color:{C.PRI};font-size:10pt;">SEU ASSISTENTE PESSOAL</p>'
-                     f'<h2 style="color:{C.TEXT};font-weight:500;">Olá. Eu sou a CHLOE.</h2>'
-                     f'<p style="color:{C.TEXT_DIM};line-height:150%;">Um espaço para suas ideias,<br>'
-                     'perguntas e próximas descobertas.</p>'
-                     f'<p style="color:{C.TEXT_DIM};">Comece com uma mensagem ou conecte sua chave de API.</p>')
+        self.setHtml(f'<p style="color:{C.TEXT_DIM};">Suas mensagens aparecem aqui.</p>')
         self._sig.connect(self._append)
 
     def append_log(self, text):
@@ -75,6 +71,8 @@ class ChatView(QTextEdit):
                 f'{escape(content).replace(chr(10), "<br>")}</p>')
         cursor = QTextCursor(self.document())
         cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not self.document().isEmpty():
+            cursor.insertBlock()
         cursor.insertHtml(html)
         if at_bottom:
             bar.setValue(bar.maximum())

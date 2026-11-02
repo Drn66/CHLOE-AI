@@ -48,6 +48,45 @@ O exemplo inicia com o microfone desativado: alguns headsets Bluetooth
 silenciam a saída estéreo ao abrir seu microfone. Isso não impede respostas
 faladas a mensagens digitadas. A voz padrão é `Aoede`, com instruções em pt-BR.
 
+## Atalho no Windows
+
+Com o ambiente `.venv` instalado, o botão **Criar atalho na área de trabalho**
+gera **CHLOE AI**, usando `.venv\Scripts\pythonw.exe` e `launch_chloe.py`.
+O inicializador executa `main.py` na pasta do projeto, sem terminal. Se já
+houver uma instância aberta nessa pasta, o atalho tenta trazê-la para frente.
+Feche pelo **X** da janela ou **Alt+F4**. O atalho não ativa início automático.
+
+Falhas de execução são exibidas em uma caixa de diálogo; `logs/launcher.log`
+registra somente horário, código do evento e código numérico de saída.
+Mensagens de exceção, saídas brutas e credenciais não são gravadas pelo
+inicializador. Mantenha a pasta do projeto e seu ambiente no mesmo local;
+se movê-los, recrie o ambiente e o atalho no destino.
+
+## Interface e inicialização
+
+A conversa começa recolhida em instalações novas. Use **Conversa**, no topo,
+para abrir ou ocultar o painel; arraste o divisor para ajustar sua largura.
+A escolha e a largura ficam em `config/ui_preferences.json`, ignorado pelo Git
+e separado das credenciais. Recolher o painel preserva as mensagens, o rascunho
+e o anexo; microfone e interrupção continuam acessíveis no rodapé.
+
+A faixa superior mostra horário local, CPU, RAM e GPU. As leituras são
+compartilhadas com o monitor existente: CPU/RAM a cada 2 segundos e GPU/
+temperatura a cada 6 segundos, em segundo plano. **Indisponível** significa
+que não há uma leitura válida; 0% só aparece quando foi medido.
+
+Em **Controles → Inicialização · saudação**, escolha se quer uma saudação,
+silenciosa ou falada, e quais dados incluir. O padrão é uma saudação silenciosa
+com horário. Ela ocorre no máximo uma vez por abertura, após conectar; uma
+reconexão não a repete. Se você começar a interagir ou a CHLOE estiver em
+repouso, a saudação é dispensada. Sem saída de áudio pronta, a opção falada
+recorre ao texto. A voz continua sendo gerada pelo Gemini existente.
+
+Notícias não são buscadas automaticamente na inicialização. Você ainda pode
+pedir notícias na conversa. Preferências antigas do resumo matinal não
+reativam a busca automática. Memória pessoal e credenciais não são migradas
+nem regravadas para armazenar essas novas preferências.
+
 ## Verificações
 
 ```powershell
@@ -57,6 +96,47 @@ faladas a mensagens digitadas. A voz padrão é `Aoede`, com instruções em pt-
 Os testes não usam credenciais nem fazem chamadas reais ao Gemini. As
 dependências não estão travadas em versões exatas; `requirements.txt` contém
 as faixas e as dependências opcionais da aplicação.
+
+Os testes do painel incluem regressões do JavaScript real em Node.js, sem
+pacotes npm. Instale Node.js para executá-las; sem ele, o teste é marcado como
+ignorado. Os testes de interface web usam Chromium isolado do Playwright:
+
+```powershell
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -p test_dashboard_browser.py -v
+```
+
+Há também um smoke test da janela desktop real, com configuração temporária,
+sem credenciais, backend Gemini ou captura de microfone. A janela fecha sozinha:
+
+```powershell
+.\.venv\Scripts\python.exe -B tests\smoke_desktop.py --seconds 8
+```
+
+## Segurança e recuperação do painel remoto
+
+O painel aceita somente HTTPS/WSS. Certificado ausente, inválido, expirado ou
+incompatível com a chave desativa o painel; a aplicação desktop continua
+disponível. Não há fallback para HTTP na rede. Use certificado confiável no
+celular para habilitar os recursos de voz, preservando as proteções do navegador.
+
+A aplicação não altera firewall ou perfil de rede e não solicita elevação para
+liberar acesso. Caso a rede bloqueie o painel, a configuração deve ser feita
+explicitamente pelo responsável, limitada a TCP 8000, perfil privado e rede
+local. Regras antigas de versões anteriores não são removidas automaticamente.
+
+Revogar um dispositivo invalida suas sessões, conexões e comandos ainda não
+iniciados. O bearer expira em oito horas e a credencial de reconexão em 30 dias;
+reiniciar o servidor invalida ambos. Uma ação já aceita pelo Gemini antes da
+revogação não pode ser desfeita pelo mecanismo de autenticação.
+
+Uma mensagem remota só aparece como entregue após o aceite do transporte ao
+Gemini. Em caso de resposta incerta, use **Consultar envio**: o mesmo ID é
+reutilizado para impedir execução duplicada. Falhas preservam o rascunho.
+Configurações usam gravações atômicas; se o arquivo estiver ilegível ou sem
+acesso, ele é preservado e a interface permite corrigir o problema e tentar
+novamente. Atalho, auto-start Windows e execução direta de `main.py` usam o
+supervisor; fechar a janela encerra o runtime e seus recursos.
 
 ## Dados que ficam neste computador
 

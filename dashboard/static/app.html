@@ -63,6 +63,12 @@
     .lbl { font-size:9px; font-weight:700; letter-spacing:2px; text-transform:uppercase; opacity:0.45; margin-bottom:4px; }
     .msg-j .lbl { color:var(--accent); }
     .msg-u .lbl { color:var(--muted); text-align:right; }
+    .delivery-status { display:block; margin-top:7px; font-size:11px; color:var(--muted); }
+    .msg-u[data-state="failed"] .delivery-status,
+    .msg-u[data-state="unknown"] .delivery-status { color:#f87171; }
+    .msg-u[data-state="delivered"] .delivery-status { color:var(--green); }
+    .delivery-retry { margin-top:8px; padding:7px 10px; font-size:10px; }
+    .btn:disabled { opacity:0.5; cursor:wait; }
 
     /* ── FILE CARD ── */
     .msg-file {
@@ -144,20 +150,25 @@
   </header>
   <main id="feed"></main>
   <footer>
-    <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off">
+    <input id="inp" placeholder="Send a command to JARVIS…" autocomplete="off" maxlength="20000">
     <label class="btn-attach" for="file-inp" title="Send file">📎</label>
     <input type="file" id="file-inp" multiple accept="*/*" style="display:none">
     <button id="mic-btn" onclick="doMic()" title="Voice command">🎤</button>
     <button class="btn btn-wake" id="wake" onclick="doWake()">WAKE</button>
-    <button class="btn btn-send" onclick="doSend()">SEND</button>
+    <button id="send-btn" class="btn btn-send" onclick="doSend()">SEND</button>
   </footer>
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
-    const _authToken  = sessionStorage.getItem('jarvis_token');
-    const _sessionKey = sessionStorage.getItem('jarvis_key');
+    let _storageAccessFailed = false;
+    function _sessionValue(key) {
+      try { return sessionStorage.getItem(key); }
+      catch (_) { _storageAccessFailed = true; return null; }
+    }
+    const _authToken  = _sessionValue('jarvis_token');
+    const _sessionKey = _sessionValue('jarvis_key');
 
-    if (!_authToken) {
+    if (!_authToken && !_storageAccessFailed) {
       location.replace('/login');
     }
 
@@ -211,7 +222,10 @@
     const ws       = new WebSocket(_wsUrl);
 
     ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => sys('Connection lost — refresh to reconnect.');
+    ws.onclose   = () => {
+      _persistOutbox();
+      sys('Conexão perdida. Atualize para reconectar; os envios pendentes serão recuperados nesta aba.');
+    };
     ws.onerror   = () => sys('Connection error.');
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
@@ -372,29 +386,292 @@
     });
 
     // ── Commands ──────────────────────────────────────────────────────────────
-    function doSend() {
-      const inp = document.getElementById('inp');
-      const txt = inp.value.trim();
-      if (!txt) return;
-      inp.value = '';
-      append('user', txt);
-      const enc  = _encrypt(txt);
-      const body = enc ? { enc } : { text: txt };
-      _authFetch('/api/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+    let _lastCommand = null;
+    let _sendingCommand = null;
+    const _OUTBOX_KEY = 'chloe_command_outbox_v1';
+    const _OUTBOX_LIMIT = 20;
+    const _OUTBOX_RETENTION = 24 * 60 * 60;
+    const _COMMAND_TEXT_LIMIT = 20000;
+    const _deviceId = _sessionValue('jarvis_device_id');
+    const _commandScope = _deviceId ? 'device:' + _deviceId
+      : typeof CryptoJS !== 'undefined' && _authToken ? 'legacy:' + CryptoJS.SHA256(_authToken).toString() : null;
+    let _commandRecords = [];
+    let _draftUpdatedAt = Date.now() / 1000;
+    let _scopeMismatch = false;
+    let _outboxUnreadable = _storageAccessFailed;
+    let _expiredHold = false;
+    let _recoveryNotice = null;
+
+    function _recoveryMessage(text, acknowledge = false) {
+      if (!_recoveryNotice) {
+        const card = document.createElement('div'); card.className = 'msg msg-sys';
+        card.id = 'recovery-notice'; card.setAttribute('role', 'status');
+        const message = document.createElement('div');
+        const button = document.createElement('button'); button.className = 'btn delivery-retry';
+        button.textContent = 'Conferi os envios anteriores; liberar esta sessão';
+        button.addEventListener('click', _acknowledgeRecovery);
+        card.appendChild(message); card.appendChild(button); feed.appendChild(card);
+        _recoveryNotice = { message, button };
+      }
+      _recoveryNotice.message.textContent = text;
+      _recoveryNotice.button.hidden = !acknowledge;
     }
 
-    function doWake() {
-      sys('Sending wake signal…');
-      _authFetch('/api/wake', { method: 'POST' });
+    function _recoveryBlocked() {
+      if (_scopeMismatch) {
+        _recoveryMessage('Há envios de outro dispositivo ou sessão. Reconecte o dispositivo original para consultar. Antes de limpar a recuperação, confira se as ações anteriores foram executadas.', true);
+      } else if (_outboxUnreadable || !_commandScope) {
+        _recoveryMessage('Não foi possível ler a recuperação desta aba. Confira os envios anteriores antes de limpar a recuperação ou reconecte o dispositivo.', Boolean(_commandScope));
+      } else if (_expiredHold) {
+        _recoveryMessage('A recuperação de envios anteriores expirou após 24 horas. Confira as ações já executadas antes de liberar novos comandos.', true);
+      } else { return false; }
+      return true;
+    }
+
+    function _persistOutbox() {
+      if (_scopeMismatch || _outboxUnreadable || !_commandScope) return false;
+      const now = Date.now() / 1000;
+      const input = document.getElementById('inp');
+      if (input.value.length > _COMMAND_TEXT_LIMIT) {
+        _recoveryMessage('O rascunho ultrapassa 20.000 caracteres. Reduza o texto antes de enviar; o conteúdo permanece no campo.');
+        return false;
+      }
+      const commands = [];
+      for (const command of _commandRecords) {
+        if (command.status === 'delivered') continue;
+        if (now - command.createdAt > _OUTBOX_RETENTION) {
+          _expiredHold = true;
+          continue;
+        }
+        commands.push({ id: command.id, createdAt: command.createdAt, text: command.text, status: command.status });
+      }
+      const draftExpired = now - _draftUpdatedAt > _OUTBOX_RETENTION;
+      if (draftExpired && input.value) _expiredHold = true;
+      try {
+        // sessionStorage is local to this browser tab. No conversation content
+        // is logged, sent elsewhere or retained after successful delivery.
+        sessionStorage.setItem(_OUTBOX_KEY, JSON.stringify({
+          version: 1, scope: _commandScope, commands, expiredHold: _expiredHold,
+          draft: draftExpired ? '' : input.value, draftUpdatedAt: _draftUpdatedAt,
+        }));
+        if (_expiredHold) _recoveryBlocked();
+        return true;
+      } catch (_) {
+        _recoveryMessage('Não foi possível salvar a recuperação nesta aba. Seu rascunho continua aqui; mantenha a aba aberta e tente novamente. Nenhum novo envio será iniciado sem salvar sua identificação.');
+        return false;
+      }
+    }
+
+    function _restoreOutbox() {
+      if (_storageAccessFailed) { _recoveryBlocked(); return; }
+      let saved;
+      try {
+        const raw = sessionStorage.getItem(_OUTBOX_KEY);
+        if (!raw) return;
+        if (raw.length > 500000) throw new Error();
+        saved = JSON.parse(raw);
+        if (saved.version !== 1 || typeof saved.scope !== 'string' || !Array.isArray(saved.commands)
+            || saved.scope.length > 256
+            || saved.commands.length > _OUTBOX_LIMIT || typeof saved.draft !== 'string'
+            || saved.draft.length > _COMMAND_TEXT_LIMIT || !Number.isFinite(saved.draftUpdatedAt)
+            || saved.draftUpdatedAt > Date.now() / 1000 + 60) throw new Error();
+        const ids = new Set();
+        for (const command of saved.commands) {
+          if (typeof command.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(command.id)
+              || ids.has(command.id) || !Number.isFinite(command.createdAt)
+              || command.createdAt <= 0 || command.createdAt > Date.now() / 1000 + 60
+              || typeof command.text !== 'string' || !command.text.trim()
+              || command.text.length > _COMMAND_TEXT_LIMIT
+              || !['pending', 'failed', 'unknown'].includes(command.status)) throw new Error();
+          ids.add(command.id);
+        }
+      } catch (_) {
+        _outboxUnreadable = true; _recoveryBlocked(); return;
+      }
+      const now = Date.now() / 1000;
+      _scopeMismatch = saved.scope !== _commandScope;
+      _expiredHold = saved.expiredHold === true;
+      if (now - saved.draftUpdatedAt <= _OUTBOX_RETENTION) {
+        document.getElementById('inp').value = saved.draft;
+        _draftUpdatedAt = saved.draftUpdatedAt;
+      } else if (saved.draft) { _expiredHold = true; }
+      for (const record of saved.commands) {
+        if (now - record.createdAt > _OUTBOX_RETENTION) { _expiredHold = true; continue; }
+        // Navigation interrupted a pending transport. Only a server status
+        // query with the original identity can resolve that uncertainty.
+        if (record.status === 'pending') record.status = 'unknown';
+        _lastCommand = _commandCard(record.text, record);
+      }
+      _recoveryBlocked();
+      if (!_scopeMismatch) _persistOutbox();
+      else if (_expiredHold) {
+        // Expired contents are removed even when a different device is signed
+        // in, while retaining the old scope and the explicit safety barrier.
+        try {
+          sessionStorage.setItem(_OUTBOX_KEY, JSON.stringify({
+            version: 1, scope: saved.scope, expiredHold: true,
+            commands: saved.commands.filter(command => now - command.createdAt <= _OUTBOX_RETENTION),
+            draft: now - saved.draftUpdatedAt <= _OUTBOX_RETENTION ? saved.draft : '',
+            draftUpdatedAt: saved.draftUpdatedAt,
+          }));
+        } catch (_) { _recoveryMessage('Não foi possível atualizar a recuperação expirada. Mantenha esta aba aberta e confira os envios anteriores.', true); }
+      }
+    }
+
+    function _acknowledgeRecovery() {
+      const previous = { records: _commandRecords, mismatch: _scopeMismatch,
+        unreadable: _outboxUnreadable, expired: _expiredHold, last: _lastCommand };
+      const now = Date.now() / 1000;
+      _commandRecords = _scopeMismatch || _outboxUnreadable ? []
+        : _commandRecords.filter(command => now - command.createdAt <= _OUTBOX_RETENTION);
+      _scopeMismatch = _outboxUnreadable = _expiredHold = false;
+      _lastCommand = _commandRecords.at(-1) || null;
+      _draftUpdatedAt = now;
+      if (!_persistOutbox()) {
+        _commandRecords = previous.records; _scopeMismatch = previous.mismatch;
+        _outboxUnreadable = previous.unreadable; _expiredHold = previous.expired; _lastCommand = previous.last;
+        return;
+      }
+      for (const command of previous.records) {
+        if (!_commandRecords.includes(command)) command.retry.hidden = true;
+      }
+      _recoveryMessage('Recuperação liberada após sua conferência. Os envios antigos não foram executados novamente.');
+    }
+
+    function _newCommandId() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    function _renderCommand(command) {
+      command.card.dataset.state = command.status;
+      command.label.textContent = {
+        pending: 'Enviando — aguardando confirmação da CHLOE…',
+        delivered: 'Entregue à CHLOE',
+        failed: command.error || 'Não foi possível entregar. Seu texto foi preservado.',
+        unknown: 'Entrega não confirmada. Consulte o envio antes de repetir o comando.',
+      }[command.status];
+      command.retry.hidden = command.status === 'pending' || command.status === 'delivered';
+      command.retry.textContent = command.status === 'unknown' ? 'Consultar envio' : 'Tentar novamente';
+    }
+
+    function _commandCard(text, restored = null) {
+      const command = restored || { id: _newCommandId(), createdAt: Date.now() / 1000, text, status: 'pending' };
+      const card = document.createElement('div');
+      card.className = 'msg msg-u'; card.dataset.commandId = command.id;
+      const title = document.createElement('div'); title.className = 'lbl'; title.textContent = 'Você';
+      const content = document.createElement('div'); content.textContent = text;
+      const label = document.createElement('span'); label.className = 'delivery-status';
+      label.setAttribute('role', 'status'); label.setAttribute('aria-live', 'polite');
+      const retry = document.createElement('button');
+      retry.className = 'btn btn-send delivery-retry';
+      retry.addEventListener('click', () => _sendCommand(command));
+      card.appendChild(title); card.appendChild(content); card.appendChild(label); card.appendChild(retry);
+      Object.assign(command, { card, label, retry });
+      _commandRecords.push(command);
+      _renderCommand(command); feed.appendChild(card); feed.scrollTop = feed.scrollHeight;
+      return command;
+    }
+
+    async function _sendCommand(command) {
+      if (_sendingCommand || command.status === 'delivered') return;
+      if (_recoveryBlocked()) return;
+      if (!_commandRecords.includes(command)) return;
+      _sendingCommand = command;
+      command.status = 'pending'; command.error = '';
+      if (!_persistOutbox() || _recoveryBlocked()) {
+        command.status = 'failed';
+        command.error = 'Envio não iniciado: não foi possível salvar a recuperação. Seu texto permanece nesta aba.';
+        _renderCommand(command); _sendingCommand = null;
+        return;
+      }
+      _renderCommand(command);
+      document.getElementById('send-btn').disabled = true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const encrypted = _encrypt(command.text);
+        const body = { id: command.id, created_at: command.createdAt };
+        Object.assign(body, encrypted ? { enc: encrypted } : { text: command.text });
+        const response = await _authFetch('/api/command', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body), signal: controller.signal,
+        });
+        let result;
+        try { result = await response.json(); } catch (_) { result = null; }
+        if (response.ok && result?.id === command.id && result.status === 'delivered' && result.ok === true) {
+          command.status = 'delivered';
+          const input = document.getElementById('inp');
+          if (input.value.trim() === command.text) { input.value = ''; _draftUpdatedAt = Date.now() / 1000; }
+        } else if (response.status === 401) {
+          command.status = 'failed';
+          command.error = 'Sessão expirada ou revogada. Reconecte o dispositivo; seu texto foi preservado.';
+          if (!document.getElementById('reconnect-device')) {
+            const reconnect = document.createElement('a');
+            reconnect.id = 'reconnect-device'; reconnect.href = '/login';
+            reconnect.className = 'delivery-retry';
+            reconnect.textContent = 'Reconectar dispositivo';
+            feed.appendChild(reconnect);
+          }
+        } else if (result?.status === 'unknown' || result?.status === 'pending' || response.ok) {
+          command.status = 'unknown';
+        } else {
+          command.status = 'failed';
+          command.error = 'Não foi possível entregar. Verifique a conexão e tente novamente; seu texto foi preservado.';
+        }
+      } catch (_) {
+        // A lost response does not prove the command was not executed. Retry
+        // always reuses this ID and timestamp so the server can deduplicate it.
+        command.status = 'unknown';
+      } finally {
+        clearTimeout(timeout);
+        _renderCommand(command);
+        _sendingCommand = null;
+        document.getElementById('send-btn').disabled = false;
+        _commandRecords = _commandRecords.filter(record => record.status !== 'delivered');
+        _persistOutbox();
+      }
+    }
+
+    async function doSend() {
+      const text = document.getElementById('inp').value.trim();
+      if (!text || _sendingCommand) return;
+      if (_recoveryBlocked()) return;
+      if (text.length > _COMMAND_TEXT_LIMIT) {
+        _recoveryMessage('A mensagem ultrapassa 20.000 caracteres. Reduza o texto antes de enviar.'); return;
+      }
+      try {
+        // A repeated click/Enter after failure queries or retries the same
+        // attempt. Editing the draft intentionally creates a different command.
+        _lastCommand = _commandRecords.find(command => command.text === text) || null;
+        if (!_lastCommand && _commandRecords.length >= _OUTBOX_LIMIT) {
+          _recoveryMessage('Há 20 envios sem confirmação nesta aba. Consulte ou conclua os envios anteriores antes de iniciar outro.'); return;
+        }
+        if (!_lastCommand)
+          _lastCommand = _commandCard(text);
+        await _sendCommand(_lastCommand);
+      } catch (_) {
+        sys('Não foi possível preparar o envio. Seu texto foi preservado.');
+      }
+    }
+
+    async function doWake() {
+      try {
+        const response = await _authFetch('/api/wake', { method: 'POST' });
+        sys(response.ok ? 'Solicitação de despertar enviada.' : 'Não foi possível despertar. Reconecte o dispositivo.');
+      } catch (_) { sys('Sem conexão para despertar. Tente novamente.'); }
     }
 
     document.getElementById('inp').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
     });
+    document.getElementById('inp').addEventListener('input', () => {
+      _draftUpdatedAt = Date.now() / 1000;
+      _persistOutbox();
+    });
+    window.addEventListener('pagehide', _persistOutbox);
+    _restoreOutbox();
 
     // ── Toast ─────────────────────────────────────────────────────────────────
     let _toastTimer;
@@ -407,16 +684,79 @@
 
     // ── Real-time Voice — PCM16 WebSocket → Gemini Live ──────────────────────
     const micBtn  = document.getElementById('mic-btn');
-    let _voiceWs  = null;
-    let _audioCtx = null;
-    let _micStm   = null;
-    let _audioNd  = null;
+    let _voiceSession = null;
 
-    function _micIdle() {
-      micBtn.innerHTML = '🎤';
-      micBtn.title     = 'Voice — tap to speak';
-      micBtn.classList.remove('recording');
+    function _setVoiceState(state) {
+      micBtn.dataset.state = state;
+      micBtn.disabled = state === 'stopping';
+      micBtn.classList.toggle('recording', state === 'recording');
+      micBtn.setAttribute('aria-pressed', String(state === 'recording'));
+      micBtn.innerHTML = state === 'starting' || state === 'recording' ? '⏹' : state === 'stopping' ? '…' : '🎤';
+      micBtn.title = {
+        idle: 'Microfone — toque para falar',
+        starting: 'Cancelar inicialização do microfone',
+        recording: 'Parar microfone',
+        stopping: 'Cancelando microfone — aguardando a permissão pendente',
+        error: 'Falha no microfone — toque para tentar novamente',
+      }[state];
     }
+
+    function _voiceCurrent(session) {
+      return _voiceSession === session && !session.cancelled;
+    }
+
+    // Each attempt owns its resources. A late callback can only close its own
+    // attempt; it must never affect a newer microphone session.
+    function _releaseVoice(session) {
+      clearTimeout(session.timeout);
+      session.timeout = null;
+      for (const node of session.nodes.splice(0)) {
+        if (node.port) node.port.onmessage = null;
+        node.onaudioprocess = null;
+        try { node.disconnect(); } catch (_) {}
+      }
+      if (session.stream) {
+        for (const track of session.stream.getTracks()) {
+          track.onended = null;
+          try { track.stop(); } catch (_) {}
+        }
+        session.stream = null;
+      }
+      if (session.socket) {
+        const socket = session.socket;
+        session.socket = null;
+        socket.onopen = socket.onclose = socket.onerror = null;
+        if (socket.readyState < 2) { try { socket.close(); } catch (_) {} }
+      }
+      if (session.context) {
+        const context = session.context;
+        session.context = null;
+        try { Promise.resolve(context.close()).catch(() => {}); } catch (_) {}
+      }
+      if (session.blobUrl) {
+        URL.revokeObjectURL(session.blobUrl);
+        session.blobUrl = null;
+      }
+    }
+
+    function _stopVoice(session = _voiceSession, finalState = 'idle') {
+      if (!session) return;
+      session.cancelled = true;
+      session.finalState = finalState;
+      _releaseVoice(session);
+      if (_voiceSession !== session) return;
+      // getUserMedia cannot be aborted. Keep a cancelled attempt registered
+      // until it settles, preventing another concurrent permission request.
+      if (session.permissionPending) {
+        _setVoiceState('stopping');
+      } else {
+        _voiceSession = null;
+        _setVoiceState(finalState);
+      }
+    }
+
+    _setVoiceState('idle');
+    window.addEventListener('pagehide', () => _stopVoice());
 
     // Float32 PCM → resample to 16 kHz + convert to Int16
     function _f32toPcm16(f32, srcRate) {
@@ -436,7 +776,6 @@
 
     function _showVoiceSetup() {
       if (document.getElementById('voice-setup')) return; // show once
-      const origin = location.origin;
       const card = document.createElement('div');
       card.id = 'voice-setup';
       card.style.cssText = [
@@ -445,114 +784,127 @@
         'padding:16px 18px', 'font-size:13px', 'line-height:1.8',
         'animation:pop 0.18s ease'
       ].join(';');
-      card.innerHTML =
-        '<div style="font-weight:700;color:#818cf8;letter-spacing:.5px;margin-bottom:10px">🎤 One-time voice setup</div>' +
-        '<ol style="padding-left:18px;color:#8899aa;margin:0;display:flex;flex-direction:column;gap:4px">' +
-        '<li>Open a new tab → go to <span style="background:rgba(255,255,255,0.07);padding:1px 6px;border-radius:4px;font-family:monospace;font-size:12px">chrome://flags</span></li>' +
-        '<li>Search: <strong style="color:#dde3ed">Insecure origins treated as secure</strong></li>' +
-        '<li>Paste this URL into the box:<br><span id="flags-url" style="background:rgba(255,255,255,0.07);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:11px;user-select:all;cursor:pointer">' + esc(origin) + '</span></li>' +
-        '<li>Set to <strong style="color:#22c55e">Enabled</strong> → tap <strong style="color:#dde3ed">Relaunch</strong></li>' +
-        '<li>Return here and tap 🎤</li>' +
-        '</ol>';
+      card.textContent = 'O navegador não disponibilizou o microfone. Abra o painel por HTTPS com um certificado confiável e permita o acesso ao microfone nas configurações do site. A conversa por texto continua disponível.';
       feed.appendChild(card);
       feed.scrollTop = feed.scrollHeight;
-      // tap to copy
-      card.querySelector('#flags-url').addEventListener('click', () => {
-        navigator.clipboard?.writeText(origin).then(() => toast('URL copied!')).catch(() => {});
-      });
     }
 
     async function doMic() {
-      if (_voiceWs) { _stopVoice(); return; }
-
+      if (_voiceSession) { _stopVoice(); return; }
       if (!navigator.mediaDevices?.getUserMedia) {
+        _setVoiceState('error');
         _showVoiceSetup();
         return;
       }
-      let stream;
+      const session = {
+        cancelled: false, permissionPending: true, stream: null,
+        context: null, socket: null, nodes: [], blobUrl: null, timeout: null,
+      };
+      _voiceSession = session;
+      _setVoiceState('starting');
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        session.stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         });
-      } catch (e) {
-        sys(e.name === 'NotAllowedError'
-          ? 'Microphone denied — tap the address bar lock and allow microphone.'
-          : 'Mic error: ' + e.message);
-        return;
-      }
-
-      // 16 kHz context (fall back to native rate — _f32toPcm16 resamples)
-      let ctx;
-      try { ctx = new AudioContext({ sampleRate: 16000 }); }
-      catch (_) { ctx = new AudioContext(); }
-      if (ctx.state === 'suspended') await ctx.resume();
-
-      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(
-        `${wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`
-      );
-      ws.binaryType = 'arraybuffer';
-
-      ws.onopen = async () => {
-        const rate = ctx.sampleRate;
-        const src  = ctx.createMediaStreamSource(stream);
-
-        // AudioWorklet (modern) — runs in dedicated audio thread
-        const wCode = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
-        try {
-          const burl = URL.createObjectURL(new Blob([wCode], { type: 'application/javascript' }));
-          await ctx.audioWorklet.addModule(burl);
-          URL.revokeObjectURL(burl);
-          const nd = new AudioWorkletNode(ctx, 'j');
-          // Buffer to 1024 samples (64 ms at 16 kHz) before sending —
-          // matches PC mic chunk size, prevents queue flooding on the server.
-          let _pbuf = [], _plen = 0;
-          nd.port.onmessage = e => {
-            const chunk = new Int16Array(_f32toPcm16(e.data, rate));
-            _pbuf.push(chunk); _plen += chunk.length;
-            if (_plen >= 1024) {
-              const out = new Int16Array(_plen); let off = 0;
-              for (const c of _pbuf) { out.set(c, off); off += c.length; }
-              if (ws.readyState === 1) ws.send(out.buffer);
-              _pbuf = []; _plen = 0;
+        session.permissionPending = false;
+        if (!_voiceCurrent(session)) { _stopVoice(session, session.finalState); return; }
+        for (const track of session.stream.getTracks()) {
+          track.onended = () => {
+            if (_voiceCurrent(session)) {
+              sys('O microfone foi desconectado. Conecte-o novamente e tente outra vez.');
+              _stopVoice(session, 'error');
             }
           };
-          src.connect(nd);
-          _audioNd = nd;
-        } catch (_) {
-          // ScriptProcessor fallback (deprecated, still works everywhere)
-          const sp = ctx.createScriptProcessor(4096, 1, 1);
-          sp.onaudioprocess = e => {
-            if (ws.readyState === 1) ws.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
-          };
-          src.connect(sp); sp.connect(ctx.destination);
-          _audioNd = sp;
         }
 
-        micBtn.innerHTML = '⏹';
-        micBtn.title     = 'Tap to stop';
-        micBtn.classList.add('recording');
-        sys('Voice live — speak now');
-        toast('🎤 Live');
-      };
+        // Keep the existing PCM16 transport and native-rate fallback.
+        let ctx;
+        try { ctx = new AudioContext({ sampleRate: 16000 }); }
+        catch (_) { ctx = new AudioContext(); }
+        session.context = ctx;
+        if (ctx.state === 'suspended') await ctx.resume();
+        if (!_voiceCurrent(session)) { _releaseVoice(session); return; }
+        const socket = new WebSocket(
+          `${_wsProto}://${location.host}/ws/phone-audio?token=${encodeURIComponent(_authToken)}`
+        );
+        session.socket = socket;
+        socket.binaryType = 'arraybuffer';
+        session.timeout = setTimeout(() => {
+          if (_voiceCurrent(session)) {
+            sys('Não foi possível iniciar a voz a tempo. Tente novamente.');
+            _stopVoice(session, 'error');
+          }
+        }, 10000);
 
-      ws.onclose = () => { _stopVoice(); };
-      ws.onerror = () => { sys('Voice connection failed.'); _stopVoice(); };
-
-      _voiceWs  = ws;
-      _audioCtx = ctx;
-      _micStm   = stream;
-    }
-
-    function _stopVoice() {
-      if (_audioNd)  { try { _audioNd.disconnect(); }  catch (_) {}; _audioNd  = null; }
-      if (_audioCtx) { try { _audioCtx.close(); }      catch (_) {}; _audioCtx = null; }
-      if (_micStm)   { _micStm.getTracks().forEach(t => t.stop()); _micStm = null; }
-      if (_voiceWs)  {
-        const w = _voiceWs; _voiceWs = null;
-        if (w.readyState < 2) w.close();
+        socket.onopen = async () => {
+          if (!_voiceCurrent(session)) { _releaseVoice(session); return; }
+          try {
+            const rate = ctx.sampleRate;
+            const src = ctx.createMediaStreamSource(session.stream);
+            session.nodes.push(src);
+            const code = `class J extends AudioWorkletProcessor{process(i){const c=i[0]?.[0];if(c)this.port.postMessage(c.slice());return true;}}registerProcessor('j',J);`;
+            try {
+              const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+              session.blobUrl = url;
+              try { await ctx.audioWorklet.addModule(url); }
+              finally {
+                if (session.blobUrl === url) {
+                  URL.revokeObjectURL(url); session.blobUrl = null;
+                }
+              }
+              if (!_voiceCurrent(session)) { _releaseVoice(session); return; }
+              const node = new AudioWorkletNode(ctx, 'j');
+              session.nodes.push(node);
+              let chunks = [], length = 0;
+              node.port.onmessage = e => {
+                if (!_voiceCurrent(session) || socket.readyState !== 1) return;
+                const chunk = new Int16Array(_f32toPcm16(e.data, rate));
+                chunks.push(chunk); length += chunk.length;
+                if (length >= 1024) {
+                  const out = new Int16Array(length); let offset = 0;
+                  for (const part of chunks) { out.set(part, offset); offset += part.length; }
+                  socket.send(out.buffer); chunks = []; length = 0;
+                }
+              };
+              src.connect(node); node.connect(ctx.destination);
+            } catch (_) {
+              if (!_voiceCurrent(session)) { _releaseVoice(session); return; }
+              const node = ctx.createScriptProcessor(4096, 1, 1);
+              session.nodes.push(node);
+              node.onaudioprocess = e => {
+                if (_voiceCurrent(session) && socket.readyState === 1)
+                  socket.send(_f32toPcm16(e.inputBuffer.getChannelData(0), rate));
+              };
+              src.connect(node); node.connect(ctx.destination);
+            }
+            if (!_voiceCurrent(session)) { _releaseVoice(session); return; }
+            clearTimeout(session.timeout); session.timeout = null;
+            _setVoiceState('recording');
+            sys('Microfone ativo — toque em parar para encerrar.');
+          } catch (_) {
+            if (_voiceCurrent(session)) {
+              sys('Não foi possível processar o áudio. Verifique o dispositivo e tente novamente.');
+              _stopVoice(session, 'error');
+            } else { _releaseVoice(session); }
+          }
+        };
+        socket.onclose = () => {
+          if (_voiceCurrent(session)) sys('A conexão de voz foi encerrada. O microfone foi desligado.');
+          _stopVoice(session);
+        };
+        socket.onerror = () => {
+          if (_voiceCurrent(session)) sys('Falha na conexão de voz. O microfone foi desligado.');
+          _stopVoice(session, 'error');
+        };
+      } catch (error) {
+        session.permissionPending = false;
+        if (_voiceCurrent(session)) {
+          sys(error.name === 'NotAllowedError'
+            ? 'Permissão de microfone negada. Permita o acesso nas configurações do site e tente novamente.'
+            : 'Não foi possível iniciar o microfone. Verifique o dispositivo e tente novamente.');
+          _stopVoice(session, 'error');
+        } else { _stopVoice(session, session.finalState); }
       }
-      _micIdle();
     }
   </script>
 </body>

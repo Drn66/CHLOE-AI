@@ -38,17 +38,17 @@ class ParticleField:
 
     def paint(self, p, width, height, phase, amp, state, speaking, muted,
               reduced_motion=False):
-        active = speaking or (not muted and state not in ("SLEEPING", "INITIALISING"))
+        active = speaking or (not muted and state == "LISTENING" and amp > 0.04)
         amp = max(0.0, min(1.0, amp)) if active else 0.0
         target = 1.0 if speaking else 0.0
-        self.pink += (target - self.pink) * 0.13
+        self.pink = target
         blue, pink = QColor(LISTEN_COLOR), QColor(SPEAK_COLOR)
         col = QColor(*[round(a + (b - a) * self.pink) for a, b in
                        zip(blue.getRgb()[:3], pink.getRgb()[:3])])
         t = 0.0 if reduced_motion else phase
         cx, cy = width / 2, height * 0.46
         base_radius = max(35, min(width * 0.34, height * 0.29))
-        pulse = 1 if reduced_motion else 1 + 0.009 * math.sin(t * 1.2) + amp * 0.055
+        pulse = 1 if reduced_motion else 1 + amp * 0.065
         radius = base_radius * pulse
         glow = QRadialGradient(cx, cy, radius * 1.6)
         glow.setColorAt(0, QColor(col.red(), col.green(), col.blue(), 22 + int(amp * 15)))
@@ -76,19 +76,25 @@ class ParticleField:
             if depth > 0.8 and i % 13 == 0:
                 p.setBrush(QColor(col.red(), col.green(), col.blue(), 18))
                 p.drawEllipse(QPointF(x, y), size * 3, size * 3)
-        if speaking:
-            label, detail = "CHLOE falando", "Uma ideia de cada vez"
-        elif muted:
-            label, detail = "Microfone desativado", "Você ainda pode escrever uma mensagem"
+        if state in ("DISCONNECTED", "INITIALISING"):
+            label, detail = "Sem conexão", "Conecte a API para conversar"
+        elif state == "CONNECTING":
+            label, detail = "Conectando…", "Aguardando o Gemini"
+        elif speaking:
+            label, detail = "CHLOE falando", "Esc para interromper"
+        elif state == "MIC_UNAVAILABLE":
+            label, detail = "Microfone indisponível", "Você pode escrever uma mensagem"
         elif state in ("THINKING", "PROCESSING"):
             label, detail = "Pensando", "Preparando uma resposta para você"
-        elif state == "LISTENING":
-            label = "Ouvindo você" if amp > 0.04 else "Pronta para ouvir"
-            detail = "Fale naturalmente ou escreva ao lado"
         elif state == "SLEEPING":
             label, detail = "Em repouso", "Use os controles para despertar"
+        elif muted:
+            label, detail = "Microfone desativado", "Você ainda pode escrever uma mensagem"
+        elif state == "LISTENING":
+            label = "Ouvindo você" if amp > 0.04 else "Pronta para ouvir"
+            detail = "Fale naturalmente ou abra a conversa"
         else:
-            label, detail = "Seu espaço de inteligência", "Configure sua chave para começar"
+            label, detail = "Pronta", "Abra a conversa para escrever"
         # The caption is anchored to the layout, never to the audio envelope.
         sy = min(cy + base_radius * 1.35, height - 80)
         compact = height < 300

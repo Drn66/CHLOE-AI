@@ -118,6 +118,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                     await task
 
     async def test_speaking_ends_even_with_microphone_muted(self):
+        self.assistant.session = SimpleNamespace()
         self.assistant._speaking_lock = threading.Lock()
         self.assistant._out_latency = 0.2
         self.assistant.ui.muted = True

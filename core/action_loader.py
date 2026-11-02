@@ -29,7 +29,6 @@ import importlib.util
 import inspect
 import re
 import sys
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -103,9 +102,8 @@ class ActionRegistry:
         try:
             return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
         except Exception as e:
-            self._logger(f"Action '{name}' crashed during run(): {e}")
-            traceback.print_exc()
-            return f"Tool '{name}' failed: {e}"
+            self._logger(f"Action '{name}' failed ({type(e).__name__}).")
+            return f"Tool '{name}' failed ({type(e).__name__})."
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
@@ -204,8 +202,7 @@ def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
 
         except Exception as e:
             rec = ActionRecord(name=path.stem, file=path.name,
-                               error=f"Failed to load: {e}")
-            traceback.print_exc()
+                               error=f"Failed to load ({type(e).__name__}).")
 
         all_records.append(rec)
         if rec.valid:

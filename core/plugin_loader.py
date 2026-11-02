@@ -12,7 +12,6 @@ import importlib.util
 import inspect
 import re
 import sys
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -93,10 +92,9 @@ class PluginRegistry:
         try:
             return _call_run(rec.run, parameters, player, session_memory) or "Done."
         except Exception as e:
-            self._logger(f"Plugin '{name}' crashed during run(): {e}")
-            self._notify(f"Plugin '{name}' failed — see the console for details.")
-            traceback.print_exc()
-            return f"Sir, the '{name}' plugin failed: {e}"
+            self._logger(f"Plugin '{name}' failed ({type(e).__name__}).")
+            self._notify(f"Plugin '{name}' failed. Verifique a conexão e as configurações do plugin.")
+            return f"Plugin '{name}' failed ({type(e).__name__})."
 
     # -- called by ui.py's settings tab to render per-plugin config forms --
     def settings_schemas(self) -> list[dict]:
@@ -207,15 +205,17 @@ def _load_error(path: Path, plugins_dir: Path, exc: Exception) -> str:
     """
     if isinstance(exc, ModuleNotFoundError):
         missing = (getattr(exc, "name", "") or "").split(".")
+        if missing and missing[0] in {"core", "actions", "memory", "frontend", "dashboard", "config", "ui", "main"}:
+            return "This plugin needs a newer version of CHLOE AI. Update the app; no package installation is required."
         if len(missing) == 2 and missing[0] == "plugins" and missing[1].startswith("_"):
             helper = missing[1] + ".py"
             return (f"Needs the shared file '{helper}', which is not in "
                     f"{plugins_dir.name}/. It comes with this plugin — download "
                     f"'{helper}' into the same folder as {path.name} and restart.")
-        if missing and missing[0] not in ("plugins",):
+        if missing and missing[0] not in ("plugins",) and _NAME_RE.fullmatch(missing[0]):
             return (f"Needs a package that is not installed: "
                     f"pip install {missing[0]}")
-    return f"Failed to load: {exc}"
+    return f"Failed to load ({type(exc).__name__})."
 
 
 def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
@@ -262,7 +262,6 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
         except Exception as e:
             rec = PluginRecord(name=path.stem, file=path.name,
                                 error=_load_error(path, plugins_dir, e))
-            traceback.print_exc()
 
         all_records.append(rec)
         if rec.valid:

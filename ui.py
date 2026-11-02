@@ -52,11 +52,14 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
 from frontend.theme import C
 from frontend.particle_core import ParticleField
 from frontend.chat import ChatView, CommandInput
+from memory.ui_preferences import load_preferences, save_preferences
+from memory.config_manager import load_api_keys, update_config
+from core.startup import windows_launch_command
 
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QGraphicsScene, QGraphicsView,
+    QGraphicsScene, QGraphicsView, QMessageBox,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 
@@ -74,10 +77,17 @@ API_FILE   = CONFIG_DIR / "api_keys.json"
 
 def _read_full_config() -> dict:
     """Read api_keys.json config dict. Returns {} on any error."""
-    try:
-        return json.loads(API_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    return load_api_keys(path=API_FILE)
+
+
+_CONFIG_SAVE_ERROR = (
+    "Não foi possível salvar a configuração. Verifique o acesso à pasta do "
+    "projeto e tente novamente. Os dados preenchidos foram preservados."
+)
+
+
+def _configuration_warning(parent):
+    QMessageBox.warning(parent, "Configuração não salva", _CONFIG_SAVE_ERROR)
 
 
 # Single source of truth for the release name — the window title, the header
@@ -86,9 +96,9 @@ APP_VERSION  = "CHLOE AI"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 1180, 780
-_MIN_W,     _MIN_H     = 820, 640
+_MIN_W,     _MIN_H     = 660, 560
 _LEFT_W  = 148
-_RIGHT_W = 560
+_RIGHT_W = 340
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -177,202 +187,9 @@ def qcol(h: str, a: int = 255) -> QColor:
 
 
 # ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
-_nvml_lib: object = None   # cached ctypes DLL
-_nvml_ok:  object = None   # None=untested, True=works, False=unavailable
+from actions.system_monitor import current_reading, get_metrics
 
-
-def _nvml_gpu_windows() -> float:
-    """Return NVIDIA GPU utilisation % using nvml.dll directly — zero subprocess."""
-    global _nvml_lib, _nvml_ok
-    if _nvml_ok is False:
-        return -1.0
-    try:
-        import ctypes
-
-        class _Util(ctypes.Structure):
-            _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
-
-        if _nvml_lib is None:
-            for dll_name in ("nvml", r"C:\Windows\System32\nvml.dll"):
-                try:
-                    lib = ctypes.WinDLL(dll_name)
-                    lib.nvmlInit_v2()
-                    _nvml_lib = lib
-                    break
-                except Exception:
-                    continue
-
-        if _nvml_lib is None:
-            import pynvml  # type: ignore
-            pynvml.nvmlInit()
-            h = pynvml.nvmlDeviceGetHandleByIndex(0)
-            _nvml_ok = True
-            return float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
-
-        dev = ctypes.c_void_p()
-        _nvml_lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
-        util = _Util()
-        _nvml_lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(util))
-        _nvml_ok = True
-        return float(util.gpu)
-    except Exception:
-        _nvml_ok = False
-        return -1.0
-
-
-class _SysMetrics:
-    def __init__(self):
-        self.cpu  = 0.0
-        self.mem  = 0.0
-        self.net  = 0.0   
-        self.gpu  = -1.0  
-        self.tmp  = -1.0  
-        self._lock = threading.Lock()
-        self._last_net = psutil.net_io_counters()
-        self._last_net_t = time.time()
-        self._running = True
-        # Probe caches — GPU (NVML) and temperature (WMI) are the expensive
-        # queries; initialise their handles once and reuse them instead of
-        # rebuilding a connection on every poll.
-        self._slow_tick = 0            # gpu/temp refreshed every 3rd cycle
-        self._pynvml    = None         # cached pynvml module + device handle
-        self._pynvml_h  = None
-        self._pynvml_ok = None         # None=untested, False=unavailable here
-        self._nv_unix   = None         # cached (lib, dev) for Linux/macOS NVML
-        self._wmi_conn  = None         # cached WMI connection (creating one is slow)
-        self._wmi_ok    = None         # None=untested, False=unavailable here
-        t = threading.Thread(target=self._loop, daemon=True)
-        t.start()
-
-    def _loop(self):
-        while self._running:
-            try:
-                self._update()
-            except Exception:
-                pass
-            time.sleep(2.0)
-
-    def _update(self):
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory().percent
-
-        nc  = psutil.net_io_counters()
-        now = time.time()
-        dt  = now - self._last_net_t
-        if dt > 0:
-            sent = (nc.bytes_sent - self._last_net.bytes_sent) / dt
-            recv = (nc.bytes_recv - self._last_net.bytes_recv) / dt
-            net  = (sent + recv) / (1024 * 1024)
-        else:
-            net = 0.0
-        self._last_net   = nc
-        self._last_net_t = now
-
-        # GPU and temperature change slowly and are the most expensive probes
-        # (NVML / WMI) — refresh them every 3rd cycle (~6 s) instead of every
-        # cycle, reusing the previous reading in between.
-        self._slow_tick = (self._slow_tick + 1) % 3
-        if self._slow_tick == 1:
-            gpu = self._get_gpu()
-            tmp = self._get_temp()
-        else:
-            gpu = self.gpu
-            tmp = self.tmp
-
-        with self._lock:
-            self.cpu = cpu
-            self.mem = mem
-            self.net = net
-            self.gpu = gpu
-            self.tmp = tmp
-
-    def _get_gpu(self) -> float:
-        # pynvml — subprocess-free; initialise once and reuse the handle.
-        # Re-initialising NVML on every poll is slow, so cache it and stop
-        # retrying pynvml entirely once it proves unavailable here.
-        if self._pynvml_ok is not False:
-            try:
-                if self._pynvml_h is None:
-                    import pynvml  # type: ignore
-                    pynvml.nvmlInit()
-                    self._pynvml    = pynvml
-                    self._pynvml_h  = pynvml.nvmlDeviceGetHandleByIndex(0)
-                    self._pynvml_ok = True
-                return float(self._pynvml.nvmlDeviceGetUtilizationRates(self._pynvml_h).gpu)
-            except Exception:
-                self._pynvml_ok = False
-
-        # Windows: nvml.dll via ctypes (already cached in _nvml_gpu_windows)
-        if _OS == "Windows":
-            return _nvml_gpu_windows()
-
-        # Linux / macOS: libnvidia-ml shared lib via ctypes — init once, reuse
-        try:
-            import ctypes
-
-            class _Util(ctypes.Structure):
-                _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
-
-            if self._nv_unix is None:
-                _lib = "libnvidia-ml.so.1" if _OS == "Linux" else "libnvidia-ml.dylib"
-                nv = ctypes.CDLL(_lib)
-                nv.nvmlInit_v2()
-                dev = ctypes.c_void_p()
-                nv.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
-                self._nv_unix = (nv, dev)
-
-            nv, dev = self._nv_unix
-            u = _Util()
-            nv.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
-            return float(u.gpu)
-        except Exception:
-            pass
-
-        return -1.0   # N/A — zero subprocess on all platforms
-
-    def _get_temp(self) -> float:
-        # psutil — works on Linux; occasionally Windows with driver support
-        try:
-            temps = psutil.sensors_temperatures()
-            for name in ["coretemp", "k10temp", "cpu_thermal", "acpitz",
-                         "cpu-thermal", "zenpower", "it8688"]:
-                if name in temps and temps[name]:
-                    return temps[name][0].current
-            for entries in temps.values():
-                if entries:
-                    return entries[0].current
-        except Exception:
-            pass
-
-        # Windows: wmi module (pure Python COM, zero subprocess). Reuse a single
-        # connection — building a fresh wmi.WMI() on every poll spins up a COM
-        # connection each time and is very slow. Give up after one failure.
-        if _OS == "Windows" and self._wmi_ok is not False:
-            try:
-                if self._wmi_conn is None:
-                    import wmi  # type: ignore
-                    self._wmi_conn = wmi.WMI(namespace="root/wmi")
-                tz = self._wmi_conn.MSAcpi_ThermalZoneTemperature()
-                if tz:
-                    return (tz[0].CurrentTemperature / 10.0) - 273.15
-            except Exception:
-                self._wmi_ok   = False
-                self._wmi_conn = None
-
-        return -1.0   # N/A — zero subprocess on all platforms
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "cpu": self.cpu,
-                "mem": self.mem,
-                "net": self.net,
-                "gpu": self.gpu,
-                "tmp": self.tmp,
-            }
-
-
-_metrics = _SysMetrics()
+_metrics = get_metrics()
 
 class HudCanvas(QWidget):
     def __init__(self, face_path: str, assistant_name: str = "CHLOE AI", parent=None):
@@ -528,10 +345,10 @@ class HudCanvas(QWidget):
         # level the audio threads pushed in.
         v_open = v_wide = v_level = None
         v_seq = None
-        sched = self._visemes
+        sched = self._visemes if self.speaking else None
         if sched is not None:
             frames, t0, hop = sched
-            i = int((now - t0) / hop)
+            i = math.floor((now - t0) / hop)
             if 0 <= i < len(frames):
                 # Hand over *every* frame since the last tick, not just the one
                 # under the cursor. This timer runs at 60 Hz but the paint is
@@ -1083,7 +900,14 @@ class SetupOverlay(QWidget):
         self._sel(detected)
         layout.addSpacing(12)
 
+        self._error_label = QLabel()
+        self._error_label.setWordWrap(True)
+        self._error_label.setStyleSheet(f"color: {C.RED}; background: transparent;")
+        self._error_label.hide()
+        layout.addWidget(self._error_label)
         init_btn = QPushButton("Conectar CHLOE AI")
+        self._submit_btn = init_btn
+        self._submitting = False
         init_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         init_btn.setFixedHeight(36)
         init_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1126,14 +950,28 @@ class SetupOverlay(QWidget):
                 """)
 
     def _submit(self):
+        if self._submitting:
+            return
         key = self._key_input.text().strip()
         if not key:
             self._key_input.setStyleSheet(
                 self._key_input.styleSheet() +
                 f" QLineEdit {{ border: 1px solid {C.RED}; }}"
             )
+            self.set_error("Informe sua chave de API para conectar.")
             return
-        self.done.emit(key, self._sel_os)
+        self.set_error("")
+        self._submitting = True
+        self._submit_btn.setEnabled(False)
+        try:
+            self.done.emit(key, self._sel_os)
+        finally:
+            self._submitting = False
+            self._submit_btn.setEnabled(True)
+
+    def set_error(self, message: str):
+        self._error_label.setText(message)
+        self._error_label.setVisible(bool(message))
 
 
 class HueWheel(QWidget):
@@ -1445,7 +1283,6 @@ class CustomizeOverlay(QWidget):
         name = self._name_input.text().strip() or "CHLOE AI"
         user = self._user_input.text().strip()
         self.saved.emit(name, user, self._sel_color or DEFAULT_UI_COLOR, self._sel_voice)
-        self.hide()
 
 
 class PluginManagerOverlay(QWidget):
@@ -1555,7 +1392,11 @@ class PluginManagerOverlay(QWidget):
     def _toggle(self, name: str, btn: QPushButton):
         from memory.config_manager import get_plugin_enabled, save_plugin_enabled
         new_val = not get_plugin_enabled(name)
-        save_plugin_enabled(name, new_val)
+        try:
+            save_plugin_enabled(name, new_val)
+        except OSError:
+            _configuration_warning(self)
+            return
         self._style_toggle(btn, new_val)
 
 
@@ -1776,13 +1617,15 @@ class AudioDeviceOverlay(_HudOverlay):
     def _apply(self):
         from memory.config_manager import (
             get_input_device, get_output_device,
-            save_input_device, save_output_device,
         )
         new_in  = self._in_box.currentData()  or ""
         new_out = self._out_box.currentData() or ""
         changed = (new_in != get_input_device()) or (new_out != get_output_device())
-        save_input_device(new_in)
-        save_output_device(new_out)
+        try:
+            update_config({"input_device": new_in, "output_device": new_out}, path=API_FILE)
+        except OSError:
+            _configuration_warning(self)
+            return
         self.hide()
         # Only rebuild the session if something actually moved — a no-op Apply
         # should not cost a reconnect.
@@ -2279,13 +2122,23 @@ class PluginSettingsOverlay(QWidget):
 
     def _save_ns(self, ns: str):
         from memory.config_manager import save_plugin_config
-        save_plugin_config(ns, self._gather(ns))
+        try:
+            save_plugin_config(ns, self._gather(ns))
+            return True
+        except OSError:
+            _configuration_warning(self)
+            return False
 
     def _save_all(self):
+        namespaces = {sec.get("namespace") or sec.get("plugin") for sec in self._sections}
+        try:
+            update_config({"plugin_config": {ns: self._gather(ns) for ns in namespaces if ns}}, path=API_FILE)
+        except OSError:
+            _configuration_warning(self)
+            return
         for sec in self._sections:
             ns = sec.get("namespace") or sec.get("plugin")
             if ns:
-                self._save_ns(ns)
                 lbl = self._status_labels.get(ns)
                 if lbl:
                     lbl.setText("Salvo ✓")
@@ -2299,7 +2152,8 @@ class PluginSettingsOverlay(QWidget):
         run_fn = (sec.get("action") or {}).get("run")
         if not callable(run_fn):
             return
-        self._save_ns(ns)                 # persist what the user typed before testing
+        if not self._save_ns(ns):
+            return
         values = self._gather(ns)
         lbl = self._status_labels.get(ns)
         if lbl:
@@ -2557,6 +2411,9 @@ class RemoteKeyOverlay(QWidget):
 
 
 class MainWindow(QMainWindow):
+    _close_sig = pyqtSignal()
+    _connection_sig = pyqtSignal(str)
+    _greeting_sig = pyqtSignal(str)
     _log_sig        = pyqtSignal(str)
     _text_sent_sig  = pyqtSignal(str, bool)
     _mic_available_sig = pyqtSignal(bool)
@@ -2585,6 +2442,11 @@ class MainWindow(QMainWindow):
 
         # Load customization from config
         _cfg = _read_full_config()
+        self._preferences = load_preferences()
+        self._chat_collapsed = self._preferences.get("chat_collapsed", True)
+        self._chat_width = self._preferences.get("chat_width", _RIGHT_W)
+        self._connected = False
+        self._connection_state = "DISCONNECTED"
         self._assistant_name: str = (_cfg.get("assistant_name") or "CHLOE AI").strip()
         _display = self._assistant_name.upper()
 
@@ -2600,9 +2462,10 @@ class MainWindow(QMainWindow):
         self.resize(_DEFAULT_W, _DEFAULT_H)
 
         screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(_DEFAULT_W, screen.width() - 32), min(_DEFAULT_H, screen.height() - 48))
         self.move(
-            (screen.width()  - _DEFAULT_W) // 2,
-            (screen.height() - _DEFAULT_H) // 2,
+            screen.x() + (screen.width() - self.width()) // 2,
+            screen.y() + (screen.height() - self.height()) // 2,
         )
 
         self.on_text_command   = None
@@ -2631,11 +2494,13 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_header())
+        root.addWidget(self._build_system_strip())
 
-        body = QHBoxLayout()
+        body = QSplitter(Qt.Orientation.Horizontal)
         self._main_body = body
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
+        body.setHandleWidth(6)
+        body.setChildrenCollapsible(False)
+        body.setStyleSheet(f"QSplitter::handle {{ background: {C.BORDER}; }} QSplitter::handle:hover {{ background: {C.PRI_DIM}; }}")
 
         self._left_panel = self._build_left_panel()
         self._left_panel.setParent(central)
@@ -2821,25 +2686,24 @@ class MainWindow(QMainWindow):
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
         self._center_split.setCollapsible(0, False)
-        body.addWidget(self._center_split, stretch=4)
+        body.addWidget(self._center_split)
 
         self._right_panel = self._build_right_panel()
-        body.addWidget(self._right_panel, stretch=5)
+        body.addWidget(self._right_panel)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
+        body.splitterMoved.connect(self._remember_chat_width)
 
-        root.addLayout(body, stretch=1)
+        root.addWidget(body, stretch=1)
         root.addWidget(self._build_footer())
-        self._chat_collapsed = False
-        self._restore_chat_btn = self._make_chat_toggle("‹ Chat", "Mostrar conversa", central)
-        self._restore_chat_btn.clicked.connect(lambda: self._set_chat_visible(True))
-        self._restore_chat_btn.hide()
+        self._set_chat_visible(not self._chat_collapsed, persist=False)
+        QTimer.singleShot(0, self._layout_chat)
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
         self._ctrl_drawer = self._build_controls_drawer()
         self._warm_wake_state()
         self._update_autostart_btn(self._check_autostart())
-        from memory.config_manager import get_brief_enabled as _gbe
-        self._update_brief_btn(_gbe())
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -2857,6 +2721,9 @@ class MainWindow(QMainWindow):
         self._mic_available_sig.connect(self._set_microphone_available)
         self._playback_sig.connect(self._set_playback_status)
         self._state_sig.connect(self._apply_state)
+        self._close_sig.connect(self.close)
+        self._connection_sig.connect(self._apply_connection_state)
+        self._greeting_sig.connect(self._show_startup_greeting)
         self._content_sig.connect(self._show_content)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -3237,7 +3104,7 @@ class MainWindow(QMainWindow):
             sc.TargetPath       = target
             sc.Arguments        = f'"{args}"'
             sc.WorkingDirectory = work_dir
-            sc.Description      = "J.A.R.V.I.S AI Assistant"
+            sc.Description      = "CHLOE AI — Assistente pessoal"
             sc.IconLocation     = icon_loc
             sc.save()
             return
@@ -3252,7 +3119,7 @@ class MainWindow(QMainWindow):
             f'sc.TargetPath = "{target}"',
             f'sc.Arguments = Chr(34) & "{args}" & Chr(34)',
             f'sc.WorkingDirectory = "{work_dir}"',
-            'sc.Description = "J.A.R.V.I.S AI Assistant"',
+            'sc.Description = "CHLOE AI - Assistente pessoal"',
             f'sc.IconLocation = "{icon_loc}"',
             'sc.Save',
         ])
@@ -3373,9 +3240,10 @@ class MainWindow(QMainWindow):
 
             # ── Windows ───────────────────────────────────────────────────────
             if _os == "Windows":
-                pythonw  = python.parent / "pythonw.exe"
-                target   = str(pythonw if pythonw.exists() else python)
-                lnk      = str(desktop / "J.A.R.V.I.S.lnk")
+                command = windows_launch_command()
+                script = command.script
+                target = str(command.executable)
+                lnk      = str(desktop / "CHLOE AI.lnk")
                 icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
                 self._create_lnk_windows(lnk, target, str(script),
                                          str(script.parent), icon_loc)
@@ -3515,22 +3383,43 @@ class MainWindow(QMainWindow):
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
+        sensors = snap.get("sensors", {})
+        unavailable = {key: "Desatualizado" if sensors.get(key, {}).get("status") == "stale"
+                       else "Indisponível" for key in ("cpu", "mem", "net", "gpu", "tmp")}
+        # Validate metadata as well as numbers for every adapter feeding the UI.
+        for key in ("cpu", "mem", "net", "gpu", "tmp", "process_count"):
+            reading = current_reading(snap, key, maximum=100 if key in ("cpu", "mem", "gpu") else None)
+            snap[key] = reading if reading is not None else (None if key == "process_count" else -1.0)
+        for key, title in (("cpu", "CPU"), ("mem", "RAM"), ("gpu", "GPU")):
+            value = snap[key]
+            measured = isinstance(value, (int, float)) and 0 <= value <= 100
+            text = f"{value:.0f}%" if measured else unavailable[key]
+            self._system_labels[key].setText(f"{title} · {text}")
+            sampled_at = sensors.get(key, {}).get("collected_at")
+            tooltip = ("Última coleta válida: " + time.strftime("%H:%M:%S", time.localtime(sampled_at))
+                       if isinstance(sampled_at, (int, float)) else "Sem coleta válida disponível.")
+            self._system_labels[key].setToolTip(tooltip)
+        if snap.get("ram_total_gb"):
+            self._system_labels["mem"].setToolTip(
+                f"{snap['ram_used_gb']:.1f} GB usados de {snap['ram_total_gb']:.1f} GB")
 
         # CPU
         cpu = snap["cpu"]
-        self._bar_cpu.set_value(cpu, f"{cpu:.0f}%")
+        self._bar_cpu.set_value(max(0, cpu), f"{cpu:.0f}%" if cpu >= 0 else unavailable["cpu"])
 
         # MEM
         mem = snap["mem"]
-        self._bar_mem.set_value(mem, f"{mem:.0f}%")
+        self._bar_mem.set_value(max(0, mem), f"{mem:.0f}%" if mem >= 0 else unavailable["mem"])
 
         # NET
         net = snap["net"]
-        if net < 1.0:
+        if net < 0:
+            net_str = unavailable["net"]
+        elif net < 1.0:
             net_str = f"{net*1024:.0f}KB/s"
         else:
             net_str = f"{net:.1f}MB/s"
-        net_pct = min(100, net * 10)  # 10 MB/s = %100
+        net_pct = max(0, min(100, net * 10))
         self._bar_net.set_value(net_pct, net_str)
 
         # GPU
@@ -3538,7 +3427,7 @@ class MainWindow(QMainWindow):
         if gpu >= 0:
             self._bar_gpu.set_value(gpu, f"{gpu:.0f}%")
         else:
-            self._bar_gpu.set_value(0, "N/A")
+            self._bar_gpu.set_value(0, unavailable["gpu"])
 
         # TMP
         tmp = snap["tmp"]
@@ -3546,7 +3435,7 @@ class MainWindow(QMainWindow):
             tmp_pct = min(100, (tmp / 100) * 100)
             self._bar_tmp.set_value(tmp_pct, f"{tmp:.0f}°C")
         else:
-            self._bar_tmp.set_value(0, "N/A")
+            self._bar_tmp.set_value(0, unavailable["tmp"])
 
         try:
             boot_t  = psutil.boot_time()
@@ -3558,39 +3447,41 @@ class MainWindow(QMainWindow):
             self._uptime_lbl.setText("UP  --:--")
 
         try:
-            proc_count = len(psutil.pids())
-            self._proc_lbl.setText(f"PROC  {proc_count}")
+            proc_count = snap.get("process_count")
+            self._proc_lbl.setText(f"PROC  {proc_count}" if proc_count is not None else "PROC  --")
         except Exception:
             self._proc_lbl.setText("PROC  --")
 
 
     def _build_header(self) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(80)
+        w.setMinimumHeight(62)
         w.setStyleSheet(f"background: {C.BG}; border: none;")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(28, 12, 28, 12)
+        lay.setContentsMargins(20, 10, 20, 10)
         identity = QVBoxLayout()
         self._title_lbl = QLabel("CHLOE AI")
-        self._title_lbl.setFont(QFont("Segoe UI", 19, QFont.Weight.DemiBold))
+        self._title_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.DemiBold))
         self._title_lbl.setStyleSheet(f"color: {C.WHITE}; border: none;")
-        self._sub_lbl = QLabel("INTELIGÊNCIA PESSOAL")
+        self._sub_lbl = QLabel("Sem conexão")
         self._sub_lbl.setFont(QFont("Segoe UI", 9))
-        self._sub_lbl.setStyleSheet(f"color: {C.PRI}; border: none; letter-spacing: 2px;")
+        self._sub_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; border: none;")
         identity.addWidget(self._title_lbl)
         identity.addWidget(self._sub_lbl)
         lay.addLayout(identity)
         lay.addStretch()
-        self._clock_lbl = QLabel()
-        self._clock_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; border: none;")
         self._date_lbl = QLabel()
         self._date_lbl.hide()
-        lay.addWidget(self._clock_lbl)
         style = f"""QPushButton {{ color: {C.TEXT_MED}; background: {C.BG};
             border: 1px solid transparent; border-radius: 7px; padding: 8px 16px; }}
             QPushButton:hover, QPushButton:checked {{ color: {C.TEXT}; background: {C.PRI_GHO}; }}
             QPushButton:focus {{ border-color: {C.PRI}; }}"""
-        key_btn = QPushButton("Conectar API")
+        self._chat_toggle_btn = self._make_chat_toggle("Conversa", "Mostrar conversa")
+        self._chat_toggle_btn.setCheckable(True)
+        self._chat_toggle_btn.clicked.connect(lambda: self._set_chat_visible(self._chat_collapsed))
+        lay.addWidget(self._chat_toggle_btn)
+        key_btn = QPushButton("API")
+        key_btn.setToolTip("Configurar a conexão com Gemini")
         key_btn.setStyleSheet(style)
         key_btn.clicked.connect(self._show_setup)
         lay.addWidget(key_btn)
@@ -3606,8 +3497,27 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._drawer_btn)
         return w
 
+    def _build_system_strip(self) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(20, 4, 20, 8)
+        lay.setSpacing(24)
+        self._clock_lbl = QLabel()
+        self._system_labels = {}
+        lay.addWidget(self._clock_lbl)
+        for key, title in (("cpu", "CPU"), ("mem", "RAM"), ("gpu", "GPU")):
+            label = QLabel(f"{title} · Indisponível")
+            label.setFont(QFont("Segoe UI", 10))
+            label.setStyleSheet(f"color: {C.TEXT_MED};")
+            self._system_labels[key] = label
+            lay.addWidget(label)
+        self._clock_lbl.setFont(QFont("Segoe UI", 10))
+        self._clock_lbl.setStyleSheet(f"color: {C.TEXT_MED};")
+        lay.addStretch()
+        return w
+
     def _tick_clock(self):
-        self._clock_lbl.setText(time.strftime("%H:%M:%S"))
+        self._clock_lbl.setText(time.strftime("%H:%M"))
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
 
     def _build_left_panel(self) -> QWidget:
@@ -3674,61 +3584,68 @@ class MainWindow(QMainWindow):
         return w
     def _make_chat_toggle(self, text: str, label: str, parent=None) -> QPushButton:
         button = QPushButton(text, parent)
-        button.setFixedSize(80, 32)
+        button.setMinimumSize(96, 36)
+        button.setFont(QFont("Segoe UI", 10))
         button.setAccessibleName(label)
         button.setToolTip(label)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setStyleSheet(
             f"QPushButton {{ color: {C.TEXT_MED}; background: {C.PANEL}; "
-            f"border: 1px solid transparent; border-radius: 8px; font-size: 12px; }} "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 5px 10px; }} "
             f"QPushButton:hover {{ color: {C.TEXT}; background: {C.PRI_GHO}; }} "
             f"QPushButton:focus {{ color: {C.TEXT}; border-color: {C.PRI}; }}"
         )
         return button
 
-    def _set_chat_visible(self, visible: bool):
+    def _set_chat_visible(self, visible: bool, persist: bool = True):
         self._chat_collapsed = not visible
         self._right_panel.setVisible(visible)
-        self._restore_chat_btn.setVisible(not visible)
+        self._chat_toggle_btn.setChecked(visible)
+        self._chat_toggle_btn.setText("Ocultar conversa" if visible else "Conversa")
+        self._chat_toggle_btn.setToolTip("Ocultar conversa" if visible else "Mostrar conversa")
+        self._chat_toggle_btn.setAccessibleName(self._chat_toggle_btn.toolTip())
+        if persist:
+            save_preferences({"chat_collapsed": self._chat_collapsed})
         self._layout_chat()
-        button = self._hide_chat_btn if visible else self._restore_chat_btn
-        button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _remember_chat_width(self, *_):
+        if not self._chat_collapsed and self._main_body.orientation() == Qt.Orientation.Horizontal:
+            self._chat_width = self._right_panel.width()
+            save_preferences({"chat_width": self._chat_width})
 
     def _layout_chat(self):
-        narrow = self.width() < 960
+        narrow = self.width() < 760
         compact_chat = narrow and not getattr(self, "_chat_collapsed", False)
-        self._clock_lbl.setVisible(not narrow)
-        self._main_body.setDirection(QHBoxLayout.Direction.TopToBottom if compact_chat else QHBoxLayout.Direction.LeftToRight)
-        self._center_split.setMaximumHeight(170 if compact_chat else 16777215)
-        self._drop_zone.setFixedHeight(48 if narrow else 68)
+        self._main_body.setOrientation(Qt.Orientation.Vertical if compact_chat else Qt.Orientation.Horizontal)
+        self._center_split.setMaximumHeight(210 if compact_chat else 16777215)
+        self._drop_zone.setFixedHeight(44)
         self._file_hint.setVisible(bool(self._current_file))
-        if getattr(self, "_chat_collapsed", False):
-            self.centralWidget().layout().activate()
-            top = self._center_split.mapTo(self.centralWidget(), QPoint(0, 0)).y()
-            self._restore_chat_btn.move(self.centralWidget().width() - 102, top + 22)
-            self._restore_chat_btn.raise_()
+        if not self._chat_collapsed:
+            if compact_chat:
+                self._main_body.setSizes([180, max(240, self.height() - 330)])
+            else:
+                width = min(self._chat_width, max(300, self.width() - 320))
+                self._main_body.setSizes([max(260, self.width() - width - 6), width])
 
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
-        w.setMinimumWidth(340)
+        w.setMinimumWidth(300)
         w.setStyleSheet(f"background: {C.BG}; border: none;")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(22, 22, 22, 18)
-        lay.setSpacing(12)
+        lay.setContentsMargins(14, 8, 14, 12)
+        lay.setSpacing(8)
         title = QLabel("Conversa")
-        title.setFont(QFont("Segoe UI", 15, QFont.Weight.DemiBold))
+        title.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {C.TEXT}; border: none;")
         heading = QHBoxLayout()
         heading.addWidget(title)
         heading.addStretch()
-        self._hide_chat_btn = self._make_chat_toggle("Chat ›", "Ocultar conversa")
-        self._hide_chat_btn.clicked.connect(lambda: self._set_chat_visible(False))
-        heading.addWidget(self._hide_chat_btn)
         lay.addLayout(heading)
         self._log = LogWidget()
         self._playback_label = QLabel("Voz · aguardando conexão")
         self._playback_label.setWordWrap(True)
-        self._playback_label.setStyleSheet(f"color: {C.TEXT_DIM}; border: none; font-size: 11px;")
+        self._playback_label.setFont(QFont("Segoe UI", 9))
+        self._playback_label.setStyleSheet(f"color: {C.TEXT_DIM}; border: none;")
         lay.addWidget(self._playback_label)
         self._log._ai_name_lc = self._assistant_name.lower()
         lay.addWidget(self._log, stretch=1)
@@ -3743,6 +3660,9 @@ class MainWindow(QMainWindow):
         self._file_hint.setStyleSheet(f"color: {C.TEXT_DIM}; border: none; font-size: 11px;")
         lay.addWidget(self._file_hint)
         lay.addLayout(self._build_input_row())
+        return w
+
+    def _build_audio_controls(self) -> QHBoxLayout:
         controls = QHBoxLayout()
         self._mute_btn = QPushButton()
         self._mute_btn.setMinimumHeight(40)
@@ -3754,8 +3674,7 @@ class MainWindow(QMainWindow):
         self._interrupt_btn.setStyleSheet(f"QPushButton {{ color: {C.ACC}; background: {C.BG}; border: 1px solid transparent; border-radius: 8px; padding: 6px 12px; }} QPushButton:hover {{ background: {C.PRI_GHO}; }} QPushButton:focus {{ border-color: {C.PRI}; }}")
         self._interrupt_btn.clicked.connect(self._do_interrupt)
         controls.addWidget(self._interrupt_btn)
-        lay.addLayout(controls)
-        return w
+        return controls
 
     def _build_quick_drawer(self) -> QWidget:
         """Floating overlay panel shown when the ⚙ header button is toggled."""
@@ -3897,8 +3816,8 @@ class MainWindow(QMainWindow):
         fs_btn = _row(QPushButton("Tela cheia · F11"), self._BTN_DIM)
         fs_btn.clicked.connect(self._toggle_fullscreen)
 
-        self._brief_btn = _row(QPushButton())
-        self._brief_btn.clicked.connect(self._toggle_brief)
+        startup_btn = _row(QPushButton("Inicialização · saudação"), self._BTN_DIM)
+        startup_btn.clicked.connect(self._open_startup_preferences)
 
         self._wake_btn = _row(QPushButton())
         self._wake_btn.clicked.connect(self._toggle_wake_word)
@@ -3947,6 +3866,11 @@ class MainWindow(QMainWindow):
             self._wake_btns_sig.emit()
         threading.Thread(target=work, daemon=True, name="wake-state-warm").start()
 
+    def _open_startup_preferences(self):
+        from frontend.startup_preferences import StartupPreferencesDialog
+        self._close_controls()
+        StartupPreferencesDialog(self).exec()
+
     def _toggle_drawer(self, checked: bool):
         if checked:
             self._close_controls()
@@ -3982,7 +3906,8 @@ class MainWindow(QMainWindow):
         _W = 330
         drawer.setFixedWidth(_W)
         drawer.adjustSize()
-        drawer.setGeometry(left, 80, _W, drawer.sizeHint().height())
+        left = max(8, min(left, self.centralWidget().width() - _W - 8))
+        drawer.setGeometry(left, 64, _W, drawer.sizeHint().height())
 
     def _position_quick_drawer(self):
         if hasattr(self, "_quick_drawer"):
@@ -4483,17 +4408,35 @@ class MainWindow(QMainWindow):
 
     def _build_footer(self) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(34)
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(28, 0, 28, 0)
-        hint = QLabel("F4 · Microfone     F11 · Tela cheia     Shift+Enter · Nova linha")
-        hint.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px;")
-        lay.addWidget(hint)
-        lay.addStretch()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(20, 6, 20, 10)
+        controls = self._build_audio_controls()
+        controls.addStretch()
+        self._greeting_label = QLabel()
+        self._greeting_label.setWordWrap(True)
+        self._greeting_label.setFont(QFont("Segoe UI", 10))
+        self._greeting_label.setStyleSheet(f"color: {C.TEXT_MED};")
+        self._greeting_label.hide()
+        lay.addWidget(self._greeting_label)
+        lay.addLayout(controls)
+        info = QHBoxLayout()
+        hint = QLabel("F11 · Tela cheia   |   Shift+Enter · Nova linha")
+        hint.setFont(QFont("Segoe UI", 9))
+        hint.setStyleSheet(f"color: {C.TEXT_DIM};")
+        info.addWidget(hint)
+        info.addStretch()
         credit = QLabel("Base MARK LV · FatihMakes")
-        credit.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 10px;")
-        lay.addWidget(credit)
+        credit.setFont(QFont("Segoe UI", 9))
+        credit.setStyleSheet(f"color: {C.TEXT_DIM};")
+        credit.setToolTip("CHLOE AI deriva de MARK LV, de FatihMakes. Licença original preservada no arquivo LICENSE.")
+        info.addWidget(credit)
+        lay.addLayout(info)
         return w
+
+    def _show_startup_greeting(self, text: str):
+        self._greeting_label.setText(f"Inicialização · {text}")
+        self._greeting_label.show()
+        self._log.append_log(f"SYS: {text}")
 
     def _on_file_selected(self, path: str):
         self._current_file = path
@@ -4576,16 +4519,16 @@ class MainWindow(QMainWindow):
             script = str(Path(__file__).resolve().parent / "main.py")
             if _OS == "Windows":
                 import winreg
+                command = windows_launch_command() if not currently_on else None
                 reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
-                if currently_on:
-                    winreg.DeleteValue(reg, "JARVIS_AI")
-                else:
-                    pythonw = Path(sys.executable).parent / "pythonw.exe"
-                    exe = str(pythonw if pythonw.exists() else sys.executable)
-                    winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
-                                      f'"{exe}" "{script}"')
-                winreg.CloseKey(reg)
+                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+                try:
+                    if currently_on:
+                        winreg.DeleteValue(reg, "JARVIS_AI")
+                    else:
+                        winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ, command.command_line)
+                finally:
+                    winreg.CloseKey(reg)
             elif _OS == "Darwin":
                 plist_dir = Path.home() / "Library" / "LaunchAgents"
                 plist_dir.mkdir(parents=True, exist_ok=True)
@@ -4648,12 +4591,6 @@ class MainWindow(QMainWindow):
                 }}
                 QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
             """)
-
-    def _toggle_brief(self):
-        from memory.config_manager import get_brief_enabled, save_brief_enabled
-        new_val = not get_brief_enabled()
-        save_brief_enabled(new_val)
-        self._update_brief_btn(new_val)
 
     # ── Wake word settings ───────────────────────────────────────────────────
 
@@ -4750,14 +4687,21 @@ class MainWindow(QMainWindow):
         from memory.config_manager import (get_push_to_talk_enabled,
                                            save_push_to_talk_enabled)
         want = not get_push_to_talk_enabled()
-        save_push_to_talk_enabled(want)
+        try:
+            save_push_to_talk_enabled(want)
+        except OSError:
+            _configuration_warning(self)
+            return
         scope = None
         if self.on_push_to_talk:
             try:
                 scope = self.on_push_to_talk(want)
             except Exception as e:
                 self._log.append_log(f"ERR: Falha ao ativar pressionar para falar — {e}")
-                save_push_to_talk_enabled(False)
+                try:
+                    save_push_to_talk_enabled(False)
+                except OSError:
+                    _configuration_warning(self)
                 want = False
         self._apply_ptt_shortcut(want and scope != "global")
         self._refresh_talk_btns()
@@ -4822,8 +4766,10 @@ class MainWindow(QMainWindow):
                 if ok and self.on_wake_toggle:
                     try:
                         self.on_wake_toggle(True)   # auto-enable after a successful download
+                    except OSError:
+                        ok, msg = False, "Não foi possível salvar a ativação. Verifique o acesso à pasta do projeto."
                     except Exception:
-                        pass
+                        ok, msg = False, "Não foi possível ativar o reconhecimento por voz."
                 self._wake_dl_sig.emit(ok, msg)
             threading.Thread(target=_work, daemon=True).start()
             return
@@ -4831,8 +4777,10 @@ class MainWindow(QMainWindow):
         if self.on_wake_toggle:
             try:
                 self.on_wake_toggle(not st["enabled"])
+            except OSError:
+                _configuration_warning(self)
             except Exception:
-                pass
+                self._log.append_log("ERR: Não foi possível alterar a ativação por voz.")
         self._refresh_wake_btns()
 
     def _on_wake_install_done(self, ok: bool, msg: str):
@@ -4846,32 +4794,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._refresh_wake_btns()
-
-    def _update_brief_btn(self, enabled: bool):
-        if not hasattr(self, '_brief_btn'):
-            return
-        if enabled:
-            self._brief_btn.setText("Resumo ao iniciar: ativado")
-            self._brief_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: #001a08; color: {C.GREEN};
-                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
-                    text-align: left; padding: 0 8px;
-                }}
-                QPushButton:hover {{ background: #002010; }}
-            """)
-        else:
-            self._brief_btn.setText("Resumo ao iniciar: desativado")
-            self._brief_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {C.TEXT_DIM};
-                    border: 1px solid {C.BORDER}; border-radius: 3px;
-                    text-align: left; padding: 0 8px;
-                }}
-                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
-            """)
-
-    # ── Customization ────────────────────────────────────────────────────────────
 
     def _open_customize(self):
         cfg = _read_full_config()
@@ -4906,14 +4828,23 @@ class MainWindow(QMainWindow):
     def _apply_name_update(self, name: str, user_name: str, ui_color: str = "",
                            voice: str = ""):
         """Update all name/theme-dependent UI elements and persist to config."""
-        self._assistant_name = name.strip() or "CHLOE AI"
+        from memory.config_manager import AVAILABLE_VOICES, DEFAULT_VOICE
+        previous_voice = _read_full_config().get("voice_name", DEFAULT_VOICE)
+        fields = {"assistant_name": name.strip() or "CHLOE AI", "user_name": user_name.strip()}
+        if ui_color:
+            fields["ui_color"] = ui_color.strip().lower()
+        if voice:
+            fields["voice_name"] = voice if voice in AVAILABLE_VOICES else DEFAULT_VOICE
+        try:
+            update_config(fields, path=API_FILE)
+        except OSError:
+            self._log.append_log("ERR: Não foi possível salvar a configuração. Os dados do formulário foram preservados.")
+            _configuration_warning(self)
+            return
+        self._assistant_name = fields["assistant_name"]
         display = self._assistant_name.upper()
         self.setWindowTitle("CHLOE AI — Assistente pessoal")
-        self._title_lbl.setText(display)
-        if display in ("JARVIS", "J.A.R.V.I.S"):
-            self._sub_lbl.setText("Inteligência pessoal")
-        else:
-            self._sub_lbl.setText("Inteligência pessoal")
+        self._title_lbl.setText("CHLOE AI")
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
 
@@ -4925,30 +4856,14 @@ class MainWindow(QMainWindow):
                 retheme_all_widgets(old, current_palette())
                 color_changed = old["PRI"] != C.PRI
 
-        # Voice change → persist and, if it actually changed, rebuild the Live
-        # session so the new voice takes effect (it's fixed at connect time).
-        voice_changed = False
-        if voice:
-            from memory.config_manager import get_voice, save_voice
-            if voice != get_voice():
-                save_voice(voice)
-                voice_changed = True
-
-        try:
-            data = _read_full_config()
-            data["assistant_name"] = self._assistant_name
-            data["user_name"] = user_name.strip()
-            if ui_color:
-                data["ui_color"] = ui_color.strip().lower()
-            API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
-            self._log.append_log(f"SYS: Identidade atualizada — {display}")
-            if color_changed:
-                self._log.append_log(f"SYS: Cor da interface aplicada — {ui_color}")
-            if voice_changed:
-                self._log.append_log(f"SYS: Voz selecionada — {voice}")
-        except Exception as e:
-            self._log.append_log(f"ERR: Não foi possível salvar a configuração — {e}")
-
+        voice_changed = bool(voice and fields["voice_name"] != previous_voice)
+        self._log.append_log(f"SYS: Identidade atualizada — {display}")
+        if color_changed:
+            self._log.append_log(f"SYS: Cor da interface aplicada — {ui_color}")
+        if voice_changed:
+            self._log.append_log(f"SYS: Voz selecionada — {fields['voice_name']}")
+        if self._customize_overlay:
+            self._customize_overlay.hide()
         if voice_changed and self.on_voice_change:
             self.on_voice_change()
 
@@ -5079,7 +4994,10 @@ class MainWindow(QMainWindow):
         self._video_auto_muted = False
         self._set_muted(not self._muted)
         from memory.config_manager import _save_flag
-        _save_flag("microphone_muted", self._muted)
+        try:
+            _save_flag("microphone_muted", self._muted)
+        except OSError:
+            self._log.append_log("ERR: O estado do microfone foi alterado nesta sessão, mas não pôde ser salvo.")
 
     def _set_muted(self, muted: bool, note: str = ""):
         muted = bool(muted)
@@ -5088,15 +5006,18 @@ class MainWindow(QMainWindow):
         self._muted = muted
         self.hud.muted = muted
         self._style_mute_btn()
+        idle = self.hud.state in ("LISTENING", "MUTED", "MIC_UNAVAILABLE")
         if muted:
-            self._apply_state("SPEAKING" if self.hud.speaking else "MUTED")
+            if idle:
+                self._apply_state("MUTED")
             self._log.append_log("SYS: Microphone muted." + (f" {note}" if note else ""))
         else:
-            self._apply_state("SPEAKING" if self.hud.speaking else "LISTENING")
+            if idle:
+                self._apply_state("LISTENING")
             self._log.append_log("SYS: Microphone active." + (f" {note}" if note else ""))
 
     def _style_mute_btn(self):
-        if not getattr(self, "_ready", False):
+        if not getattr(self, "_connected", False):
             label, colour = "Microfone · sem conexão", C.TEXT_DIM
         elif getattr(self, "_mic_available", None) is False:
             label, colour = "Microfone indisponível · use o chat", C.TEXT_DIM
@@ -5136,6 +5057,8 @@ class MainWindow(QMainWindow):
 
     def _set_microphone_available(self, available: bool):
         self._mic_available = available
+        if self.hud.state in ("LISTENING", "MUTED", "MIC_UNAVAILABLE"):
+            self._apply_state("MUTED" if self._muted else "LISTENING")
         self._style_mute_btn()
 
     def _set_playback_status(self, available: bool, detail: str):
@@ -5144,6 +5067,9 @@ class MainWindow(QMainWindow):
         self._refresh_playback_status()
 
     def _refresh_playback_status(self):
+        if not self._connected:
+            self._playback_label.setText("Voz · aguardando conexão")
+            return
         if not hasattr(self, "_playback_detail"):
             return
         ready = self._playback_available
@@ -5154,9 +5080,26 @@ class MainWindow(QMainWindow):
         self._playback_label.setStyleSheet(f"color: {colour}; border: none; font-size: 11px;")
 
     def _apply_state(self, state: str):
+        was_speaking = self.hud.speaking
+        if not self._connected:
+            state = self._connection_state
+        elif state == "SPEAKING" and getattr(self, "_playback_available", False) is False:
+            state = "LISTENING"
+        elif state == "LISTENING" and getattr(self, "_mic_available", None) is False:
+            state = "MIC_UNAVAILABLE"
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        if (was_speaking and state != "SPEAKING") or state in ("CONNECTING", "DISCONNECTED", "SLEEPING", "MUTED", "MIC_UNAVAILABLE"):
+            self.hud._live_amp = self.hud._amp_disp = 0.0
+            self.hud._visemes = None
         self._style_mute_btn()
+        self._refresh_playback_status()
+
+    def _apply_connection_state(self, state: str):
+        self._connection_state = state if state in ("CONNECTING", "CONNECTED", "DISCONNECTED") else "DISCONNECTED"
+        self._connected = self._connection_state == "CONNECTED"
+        self._sub_lbl.setText({"CONNECTING": "Conectando…", "CONNECTED": "Conectada", "DISCONNECTED": "Sem conexão"}[self._connection_state])
+        self._apply_state("LISTENING" if self._connected else self._connection_state)
         self._refresh_playback_status()
 
     def _check_config(self) -> bool:
@@ -5184,18 +5127,25 @@ class MainWindow(QMainWindow):
         self._overlay = ov
 
     def _on_setup_done(self, key: str, os_name: str):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({**_read_full_config(), "gemini_api_key": key, "os_system": os_name, "assistant_name": "CHLOE AI"}, indent=4),
-            encoding="utf-8",
-        )
+        if not isinstance(key, str) or not key.strip() or os_name not in ("windows", "mac", "linux"):
+            if self._overlay:
+                self._overlay.set_error("Preencha a chave de API e selecione um sistema válido.")
+            return
+        try:
+            update_config({"gemini_api_key": key.strip(), "os_system": os_name,
+                           "assistant_name": "CHLOE AI"}, path=API_FILE)
+        except OSError:
+            if self._overlay:
+                self._overlay.set_error(_CONFIG_SAVE_ERROR)
+            self._log.append_log("ERR: Não foi possível salvar a conexão. Verifique o acesso à pasta do projeto e tente novamente.")
+            return
         self._ready = True
         self._style_mute_btn()
         if self._overlay:
             self._overlay.hide()
             self._overlay = None
         self._apply_state("LISTENING")
-        self._assistant_name = _read_full_config().get("assistant_name", "CHLOE AI") or "CHLOE AI"
+        self._assistant_name = "CHLOE AI"
         self._log.append_log(f"SYS: Inicializado. Sistema={os_name.upper()}. {self._assistant_name} online.")
 
 
@@ -5210,6 +5160,7 @@ class _RootShim:
 
 class JarvisUI:
     def __init__(self, face_path: str, size=None):
+        self._closing = threading.Event()
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
         self._app.setFont(QFont("Segoe UI", 10))
@@ -5367,6 +5318,15 @@ class JarvisUI:
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
 
+    def set_connection_state(self, state: str):
+        self._win._connection_sig.emit(state)
+
+    def system_snapshot(self) -> dict:
+        return _metrics.snapshot()
+
+    def show_startup_greeting(self, text: str):
+        self._win._greeting_sig.emit(text)
+
     def set_microphone_available(self, available: bool):
         self._win._mic_available_sig.emit(available)
 
@@ -5376,9 +5336,15 @@ class JarvisUI:
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
+    def request_close(self):
+        """Close on the Qt thread, sharing the normal resource shutdown path."""
+        self._win._close_sig.emit()
+
     def wait_for_api_key(self):
         while not self._win._ready:
-            time.sleep(0.1)
+            if self._closing.wait(0.1):
+                return False
+        return not self._closing.is_set()
 
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""

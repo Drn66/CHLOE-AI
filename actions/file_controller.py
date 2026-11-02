@@ -1,7 +1,10 @@
 import os
 import shutil
 import platform
-from pathlib import Path
+import ctypes
+import errno
+import stat
+from pathlib import Path, PureWindowsPath
 from datetime import datetime
 
 try:
@@ -368,29 +371,135 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         return f"Could not copy: {e}"
 
 
-def rename_file(path: str, name: str = "", new_name: str = "") -> str:
+def _simple_rename_name(value: str) -> bool:
+    """Use one portable filename, including when Windows syntax arrives on Unix."""
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        return False
+    if value[-1] in ". " or any(
+        c in '<>:"/\\|?*' or ord(c) < 32 or ord(c) == 127 for c in value
+    ):
+        return False
+    windows = PureWindowsPath(value)
+    if windows.drive or windows.root:
+        return False
+    reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    reserved.update(prefix + number for prefix in ("COM", "LPT") for number in "0123456789¹²³")
+    if value.split(".", 1)[0].rstrip(" ").upper() in reserved:
+        return False
     try:
-        base     = _resolve_path(path)
-        target   = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
-        if not target.exists():
-            return f"Not found: {target.name}"
-        if not new_name:
-            return "No new name provided."
+        return len(value.encode("utf-16-le")) // 2 <= 255
+    except UnicodeError:
+        return False
 
-        new_path = target.parent / new_name
-        if new_path.exists():
-            return f"A file named '{new_name}' already exists here."
 
-        old_path = target.resolve()
-        target.rename(new_path)
-        push_undo(f"renamed {old_path.name} to {new_name}",
-                  _undo_move(old_path, new_path.resolve()))
-        return f"Renamed: {target.name} → {new_name}"
+def _entry_identity(info) -> tuple:
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
 
-    except Exception as e:
-        return f"Could not rename: {e}"
+
+def _is_link_entry(info) -> bool:
+    # Junctions are reparse points, including on Python versions without
+    # Path.is_junction(). Never resolve and rename the link's referent instead.
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _native_rename_noreplace(source: Path, destination: Path, parent_fd: int) -> None:
+    """Atomic exclusive rename, also for directories; never emulate with replace.
+
+    Linux renameat2(RENAME_NOREPLACE) and Darwin renameatx_np(RENAME_EXCL)
+    anchor both names to the same opened directory. Unsupported filesystems
+    fail safely rather than falling back to a potentially destructive rename.
+    """
+    library = ctypes.CDLL(None, use_errno=True)
+    symbol, flag = ("renameatx_np", 0x4) if _OS == "Darwin" else ("renameat2", 0x1)
+    try:
+        rename = getattr(library, symbol)
+    except AttributeError:
+        raise NotImplementedError("Exclusive rename is unavailable") from None
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(parent_fd, os.fsencode(source.name), parent_fd, os.fsencode(destination.name), flag)
+    if result:
+        code = ctypes.get_errno()
+        if code in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP):
+            raise NotImplementedError("Exclusive rename is unsupported by this filesystem")
+        raise OSError(code, os.strerror(code))
+
+
+def _rename_checked(target: Path, new_name: str) -> tuple[Path, Path, tuple]:
+    if not _simple_rename_name(new_name):
+        raise ValueError("Invalid filename")
+    parent = target.parent.resolve(strict=True)
+    source = parent / target.name
+    destination = parent / new_name
+    if not _is_safe_path(source) or not _is_safe_path(destination):
+        raise PermissionError("Outside allowed folders")
+    source_info = source.lstat()
+    if _is_link_entry(source_info):
+        raise PermissionError("Renaming links or junctions is not allowed")
+    parent_id = _entry_identity(parent.stat())
+    source_id = _entry_identity(source_info)
+    # lexists also rejects dangling links as destinations.
+    if os.path.lexists(destination):
+        raise FileExistsError("Destination already exists")
+    if parent.resolve(strict=True) != parent or _entry_identity(parent.lstat()) != parent_id:
+        raise PermissionError("Directory changed during rename")
+    if _entry_identity(source.lstat()) != source_id or not _is_safe_path(destination):
+        raise PermissionError("Source or destination changed during rename")
+    if _OS == "Windows":
+        # Windows rename fails atomically if the destination exists. Keeping the
+        # canonical parent and rechecking identities narrows ancestor races; this
+        # is not a sandbox against a local process with the same filesystem rights.
+        source.rename(destination)
+    else:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(parent, flags)
+        try:
+            if _entry_identity(os.fstat(descriptor)) != parent_id:
+                raise PermissionError("Directory changed during rename")
+            current = os.stat(source.name, dir_fd=descriptor, follow_symlinks=False)
+            if _entry_identity(current) != source_id or _is_link_entry(current):
+                raise PermissionError("Source changed during rename")
+            _native_rename_noreplace(source, destination, descriptor)
+        finally:
+            os.close(descriptor)
+    return source, destination, source_id
+
+
+def _undo_rename(source: Path, destination: Path, identity: tuple):
+    def restore():
+        try:
+            if _entry_identity(destination.lstat()) != identity:
+                return "Cannot undo: the renamed entry was replaced."
+            _rename_checked(destination, source.name)
+            return f"'{source.name}' is back in {source.parent.name}/."
+        except (OSError, ValueError, RuntimeError, NotImplementedError):
+            return "Cannot undo rename: the original location is unavailable or occupied."
+    return restore
+
+
+def rename_file(path: str, name: str = "", new_name: str = "") -> str:
+    if not isinstance(path, str) or not isinstance(name, str):
+        return "Invalid source: provide a file or folder path."
+    try:
+        base = _resolve_path(path)
+        target = (base / name) if name else base
+        source, destination, identity = _rename_checked(target, new_name)
+        push_undo(f"renamed {source.name} to {new_name}", _undo_rename(source, destination, identity))
+        return f"Renamed: {source.name} → {new_name}"
+    except ValueError:
+        return "Invalid new name: provide a simple filename without paths, reserved names or invalid characters."
+    except FileExistsError:
+        return "Cannot rename: a file or folder with that name already exists."
+    except FileNotFoundError:
+        return "Cannot rename: the source file or folder is no longer available."
+    except PermissionError:
+        return "Access denied: the path is outside allowed folders, changed, or is a link/junction."
+    except NotImplementedError:
+        return "Cannot rename safely: this filesystem does not support exclusive renaming."
+    except (OSError, RuntimeError):
+        return "Could not rename: the filesystem rejected the operation."
 
 
 def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:

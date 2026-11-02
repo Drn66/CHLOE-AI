@@ -517,7 +517,7 @@ def call(contents, tier: str = FAST, config=None,
                 print(f"[Gemini] {model}: not answering — resting it for "
                       f"{_UNAVAILABLE_SECONDS // 60} minutes")
             else:
-                print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
+                print(f"[Gemini] {model}: falha ({type(e).__name__})")
     return None
 
 
@@ -545,5 +545,5 @@ def as_json(contents, tier: str = FAST, config=None,
     try:
         return json.loads(raw)
     except Exception as e:
-        print(f"[Gemini] reply was not JSON: {e}")
+        print(f"[Gemini] Resposta JSON inválida ({type(e).__name__})")
         return default

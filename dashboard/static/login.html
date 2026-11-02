@@ -146,17 +146,18 @@
     <div class="err" id="err"></div>
     <button class="btn" onclick="doLogin()">CONNECT</button>
     <p class="voice-note">
-      🎤 <strong style="color:var(--text)">Voice commands:</strong> open
-      <code>chrome://flags</code> on your phone, search
-      <code>Insecure origins treated as secure</code>, add your JARVIS URL, tap Relaunch.
+      🎤 Para usar voz, acesse por HTTPS com um certificado confiável no dispositivo.
+      Não desative as proteções de segurança do navegador.
     </p>
   </div>
 
   <script>
+    let _loginPending = false;
     // Try auto-reconnect with stored device token (set on first QR login)
     (async function() {
       const devTok = localStorage.getItem('jarvis_device_token');
       if (!devTok) return;
+      _loginPending = true;
       document.getElementById('reconnecting').style.display = 'block';
       try {
         const r = await fetch('/api/device-login', {
@@ -168,10 +169,21 @@
         if (d.ok && d.token) {
           sessionStorage.setItem('jarvis_key', d.key);
           sessionStorage.setItem('jarvis_token', d.token);
+          sessionStorage.setItem('jarvis_device_id', d.device_id);
           location.replace('/');
           return;
         }
-      } catch (_) {}
+        if (r.status !== 401 && r.status !== 403) {
+          document.getElementById('err').textContent = 'Não foi possível reconectar. Confira a conexão e tente novamente.';
+          return;
+        }
+      } catch (_) {
+        document.getElementById('err').textContent = 'Sem conexão. A autorização do dispositivo foi preservada; tente novamente.';
+        return;
+      } finally {
+        _loginPending = false;
+        document.getElementById('reconnecting').style.display = 'none';
+      }
       // Device token rejected (server restarted) — clear it and show normal form
       localStorage.removeItem('jarvis_device_token');
       document.getElementById('reconnecting').style.display = 'none';
@@ -187,8 +199,10 @@
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 
     async function doLogin() {
+      if (_loginPending) return;
       const key = inp.value.trim();
       if (key.length < 6) { shake(); return; }
+      _loginPending = true;
       let data;
       try {
         const r = await fetch('/login', {
@@ -198,14 +212,18 @@
         });
         data = await r.json();
       } catch (e) {
+        _loginPending = false;
         document.getElementById('err').textContent = 'Connection error';
         shake(); return;
       }
       if (data.ok && data.token) {
         sessionStorage.setItem('jarvis_key', key);
         sessionStorage.setItem('jarvis_token', data.token);
+        sessionStorage.setItem('jarvis_device_id', data.device_id);
+        if (data.device_token) localStorage.setItem('jarvis_device_token', data.device_token);
         location.href = '/';
       } else {
+        _loginPending = false;
         inp.value = '';
         inp.focus();
         document.getElementById('err').textContent = 'Invalid or expired key';
