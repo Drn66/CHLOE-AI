@@ -87,6 +87,27 @@ pedir notícias na conversa. Preferências antigas do resumo matinal não
 reativam a busca automática. Memória pessoal e credenciais não são migradas
 nem regravadas para armazenar essas novas preferências.
 
+## Ilha Dinâmica
+
+O botão **Ilha**, no topo, recolhe a CHLOE para uma pílula flutuante no topo
+central da tela, sempre visível sobre outros programas e fora do Alt+Tab e da
+barra de tarefas. Ela não rouba o foco: o teclado só vai para a ilha quando você
+clica no campo de texto.
+
+- Passe o mouse para expandir; ao sair, ela recolhe após 400 ms.
+- Gire a rodinha do mouse para trocar de andar: **Assistente** (última resposta,
+  campo de texto e microfone, ligado ao mesmo mudo do F4), **Clima** e **Mídia**.
+- Se algo estiver tocando no Windows (Spotify, YouTube no navegador, VLC…), a
+  pílula mostra a capa e um equalizador, e o andar de mídia abre primeiro.
+- **⤢** ou o clique direito → **Abrir janela completa** restaura a janela como
+  estava. Clique direito → **Encerrar CHLOE** fecha o app.
+
+O player usa a API de mídia do Windows (pacotes `winrt-*` do `requirements.txt`).
+Sem eles, a ilha funciona e o andar de mídia mostra "Nada tocando agora". O clima
+só começa a ser consultado quando a ilha é aberta pela primeira vez: a cidade é
+estimada pelo IP público (ipinfo.io, com ip-api.com de reserva) e o tempo vem do
+Open-Meteo, a cada 15 minutos. Nenhuma chave de API é usada nem gravada.
+
 ## Verificações
 
 ```powershell

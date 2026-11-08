@@ -74,6 +74,12 @@ pycaw;      sys_platform == "win32"
 win10toast; sys_platform == "win32"
 pywin32;    sys_platform == "win32"
 wmi;        sys_platform == "win32"
+# Ilha Dinâmica — player universal (Windows Media / GSMTC). Sem eles a ilha
+# funciona normalmente, só o andar de mídia fica em "Nada tocando agora".
+winrt-runtime>=2,<4;                  sys_platform == "win32"
+winrt-Windows.Foundation>=2,<4;       sys_platform == "win32"
+winrt-Windows.Media.Control>=2,<4;    sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2,<4;  sys_platform == "win32"
 # pywinauto drives the Windows accessibility tree. Three plugins read it:
 # screen_agent (to aim without a model call), the WhatsApp pair, and
 # game_updater (Steam's install dialog).

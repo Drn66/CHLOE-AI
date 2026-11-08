@@ -2435,6 +2435,14 @@ class MainWindow(QMainWindow):
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
+    _island_sent_sig = pyqtSignal(str, bool)  # mensagem enviada pela Ilha Dinâmica
+
+    # Estado do HUD → estado visual da Ilha Dinâmica
+    _ISLAND_STATES = {
+        "LISTENING": "listening", "MUTED": "muted", "SPEAKING": "speaking",
+        "THINKING": "thinking", "PROCESSING": "thinking", "SLEEPING": "sleeping",
+        "CONNECTING": "connecting", "DISCONNECTED": "offline", "MIC_UNAVAILABLE": "unavailable",
+    }
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2740,7 +2748,9 @@ class MainWindow(QMainWindow):
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
+        self._island_sent_sig.connect(self._island_text_sent)
         self._cam_stop = threading.Event()
+        self._init_island()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
         self._cam_preview = _CameraPreview(self.centralWidget())
@@ -3480,6 +3490,12 @@ class MainWindow(QMainWindow):
         self._chat_toggle_btn.setCheckable(True)
         self._chat_toggle_btn.clicked.connect(lambda: self._set_chat_visible(self._chat_collapsed))
         lay.addWidget(self._chat_toggle_btn)
+        self._island_btn = QPushButton("Ilha")
+        self._island_btn.setToolTip("Recolher a CHLOE para a Ilha Dinâmica no topo da tela")
+        self._island_btn.setAccessibleName("Recolher para a Ilha Dinâmica")
+        self._island_btn.setStyleSheet(style)
+        self._island_btn.clicked.connect(self.enter_island_mode)
+        lay.addWidget(self._island_btn)
         key_btn = QPushButton("API")
         key_btn.setToolTip("Configurar a conexão com Gemini")
         key_btn.setStyleSheet(style)
@@ -4982,6 +4998,157 @@ class MainWindow(QMainWindow):
         if self.on_text_command:
             threading.Thread(target=self.on_text_command, args=(cmd,), daemon=True).start()
 
+    # ── Ilha Dinâmica ──────────────────────────────────────────────────────────
+    # A ilha é opcional: se não puder ser criada, o botão "Ilha" fica desativado e
+    # o resto da interface continua igual. Mídia e clima só começam a ser
+    # consultados na primeira vez que a ilha é aberta.
+
+    def _init_island(self) -> None:
+        self._island = None
+        self._island_media = None
+        self._island_weather = None
+        self._island_text_pending = False
+        self._island_restore_state = Qt.WindowState.WindowNoState
+        try:
+            from frontend.dynamic_island import DynamicIsland
+            island = DynamicIsland(QApplication.primaryScreen())
+        except Exception as exc:  # noqa: BLE001 - a ilha nunca derruba a janela principal
+            print(f"[Ilha] indisponível ({type(exc).__name__}).")
+            self._island_btn.setEnabled(False)
+            self._island_btn.setToolTip("Ilha Dinâmica indisponível nesta instalação.")
+            return
+        self._island = island
+        island.set_response("Olá! Passe o mouse aqui quando precisar de mim.")
+        island.message_submitted.connect(self._send_from_island)
+        island.mic_toggled.connect(self._on_island_mic)
+        island.restore_requested.connect(self.leave_island_mode)
+        island.quit_requested.connect(self._quit_from_island)
+        self._log_sig.connect(self._island_on_log)
+        QApplication.instance().aboutToQuit.connect(self._shutdown_island)
+        self._island_sync_state()
+
+    def enter_island_mode(self) -> None:
+        """Esconde a janela completa e mostra a ilha no topo da tela."""
+        if self._island is None:
+            return
+        self._ensure_island_services()
+        self._island_sync_state()
+        self._island_restore_state = self.windowState() & ~Qt.WindowState.WindowMinimized
+        self.hide()
+        self._island.show_island()
+
+    def leave_island_mode(self) -> None:
+        """Fecha a ilha e restaura a janela completa como estava."""
+        if self._island is not None and self._island.isVisible():
+            self._island.hide_island()
+        state = self._island_restore_state
+        if state & Qt.WindowState.WindowFullScreen:
+            self.showFullScreen()
+        elif state & Qt.WindowState.WindowMaximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_island(self) -> None:
+        # A janela está escondida; encerrar pelo app segue o mesmo caminho do X.
+        self.close()
+        QApplication.quit()
+
+    def _ensure_island_services(self) -> None:
+        island = self._island
+        if self._island_media is None:
+            try:
+                from core.media_service import MediaService
+                if MediaService.is_supported():
+                    media = MediaService(poll_interval=1.0)
+                    media.media_changed.connect(island.update_media)
+                    island.media_command.connect(media.send_command)
+                    media.start()
+                    self._island_media = media
+                else:
+                    self._island_media = False   # não tenta de novo nesta sessão
+                    self._log.append_log("SYS: Player da ilha indisponível: instale winrt-Windows.Media.Control "
+                                         "(pip install -r requirements.txt).")
+            except Exception as exc:  # noqa: BLE001
+                self._island_media = False
+                print(f"[Ilha] mídia indisponível ({type(exc).__name__}).")
+        if self._island_weather is None:
+            try:
+                from core.weather_service import WeatherService
+                weather = WeatherService(interval_s=15 * 60)
+                weather.weather_updated.connect(island.update_weather)
+                weather.start()
+                self._island_weather = weather
+            except Exception as exc:  # noqa: BLE001
+                self._island_weather = False
+                print(f"[Ilha] clima indisponível ({type(exc).__name__}).")
+
+    def _shutdown_island(self) -> None:
+        for service in (self._island_media, self._island_weather):
+            if service:
+                try:
+                    service.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+        if self._island is not None:
+            self._island.hide()
+
+    def _island_sync_state(self) -> None:
+        island = getattr(self, "_island", None)
+        if island is None:
+            return
+        key = self._ISLAND_STATES.get(getattr(self.hud, "state", ""), "listening")
+        if key == "listening" and self._muted:
+            key = "muted"
+        island.set_assistant_state(key)
+
+    def _island_on_log(self, text: str) -> None:
+        if self._island is None:
+            return
+        prefix, sep, body = str(text).partition(":")
+        key = prefix.strip().lower()
+        if sep and body.strip() and key in ("jarvis", "chloe ai", self._assistant_name.lower()):
+            self._island.set_response(body.strip())
+
+    def _on_island_mic(self, mute: bool) -> None:
+        if bool(mute) != self._muted:
+            self._toggle_mute()
+        self._island_sync_state()
+
+    def _send_from_island(self, text: str) -> None:
+        text = str(text).strip()
+        if not text or self._island is None:
+            return
+        callback = self.on_text_command
+        if not callback:
+            self._island.set_response("Conecte sua chave de API na janela completa (⤢) para conversar.")
+            return
+        if self._island_text_pending:
+            self._island.set_response("Aguarde: ainda estou enviando a mensagem anterior.")
+            return
+        self._island_text_pending = True
+        self._island.set_response("Enviando…")
+
+        def send():
+            try:
+                sent = bool(callback(text))
+            except Exception:  # noqa: BLE001
+                sent = False
+            self._island_sent_sig.emit(text, sent)
+
+        threading.Thread(target=send, daemon=True, name="CHLOE island send").start()
+
+    def _island_text_sent(self, text: str, sent: bool) -> None:
+        self._island_text_pending = False
+        if sent:
+            self._log.append_log(f"You: {text}")
+            if self._island is not None:
+                self._island.set_response(f"Você: {text}")
+        elif self._island is not None:
+            self._island.set_response("Não consegui enviar agora. Abra a janela completa (⤢) para ver o motivo.")
+
     # ────────────────────────────────────────────────────────────────────────────
 
     def _do_interrupt(self):
@@ -5094,6 +5261,7 @@ class MainWindow(QMainWindow):
             self.hud._visemes = None
         self._style_mute_btn()
         self._refresh_playback_status()
+        self._island_sync_state()
 
     def _apply_connection_state(self, state: str):
         self._connection_state = state if state in ("CONNECTING", "CONNECTED", "DISCONNECTED") else "DISCONNECTED"
@@ -5278,6 +5446,9 @@ class JarvisUI:
             self._win.hud.set_audio_level(level)
         except Exception:
             pass
+        island = getattr(self._win, "_island", None)
+        if island is not None:
+            island.set_voice_level(level)   # só grava um float no orbe, como o HUD
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
