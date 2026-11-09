@@ -26,7 +26,6 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import (
-    QAbstractAnimation,
     QEasingCurve,
     QParallelAnimationGroup,
     QPoint,
@@ -689,12 +688,17 @@ class VerticalSlideStack(QStackedWidget):
         self._pending = (index, cur)
         group.finished.connect(self._finish)
         self._group = group
-        group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        # KeepWhenStopped: o grupo só é liberado em _stop(), que é quem guarda a
+        # referência. Com DeleteWhenStopped o Qt apagava o objeto C++ ao fim do
+        # slide e a troca de andar seguinte chamava .state() num wrapper já
+        # destruído (RuntimeError a cada navegação pela rodinha).
+        group.start()
 
     def _stop(self) -> None:
-        if self._group is not None and self._group.state() == QAbstractAnimation.State.Running:
-            self._group.stop()
-        self._group = None
+        group, self._group = self._group, None
+        if group is not None:
+            group.stop()          # não emite finished; inofensivo se já terminou
+            group.deleteLater()
         self._finish()
 
     def _finish(self) -> None:
@@ -1245,6 +1249,7 @@ class DynamicIsland(QWidget):
     def _fade_window(self, to: float, on_done=None) -> None:
         if self._fade is not None:
             self._fade.stop()
+            self._fade.deleteLater()   # antes, cada abrir/fechar acumulava uma animação
         a = QPropertyAnimation(self, b"windowOpacity", self)
         a.setDuration(200)
         a.setStartValue(self.windowOpacity())
@@ -1283,6 +1288,7 @@ class DynamicIsland(QWidget):
                     compact_to: float, floors_to: float) -> None:
         if self._anim is not None:
             self._anim.stop()
+            self._anim.deleteLater()   # antes, cada hover acumulava um grupo de animação
         group = QParallelAnimationGroup(self)
 
         geo = QPropertyAnimation(self, b"geometry")

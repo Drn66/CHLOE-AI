@@ -24,6 +24,9 @@ class StartupCommandTests(unittest.TestCase):
         executable.touch()
         (self.base / "launch_chloe.py").touch()
         self.command = windows_launch_command(self.base)
+        log = patch.object(launcher, "LOG", self.base / "logs" / "launcher.log")  # nunca o log real
+        log.start()
+        self.addCleanup(log.stop)
 
     def test_command_uses_supervisor_and_quotes_paths_with_spaces(self):
         self.assertEqual(self.command.script.name, "launch_chloe.py")

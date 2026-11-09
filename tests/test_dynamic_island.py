@@ -72,6 +72,43 @@ class IslandWidgetTests(unittest.TestCase):
         self.island.go_to_floor(-5)
         self.assertEqual(self.island.current_floor, 0)
 
+    def test_floor_changes_after_a_finished_slide_do_not_touch_deleted_animations(self):
+        """Regressão: o slide usava DeleteWhenStopped e a troca seguinte chamava
+        .state() no grupo já apagado pelo Qt (RuntimeError → uncaught_error)."""
+        errors = []
+        with patch("sys.excepthook", lambda exc_type, *_: errors.append(exc_type)):
+            self.island.show()
+            self.island.expand()
+            for floor in (1, 2, 1, 0, 2, 0):
+                self.island.go_to_floor(floor)
+                QTest.qWait(T.SLIDE_MS + 120)   # slide termina e o deleteLater é processado
+                self.assertEqual(self.island.stack.currentIndex(), floor)
+                self.assertEqual(self.island.current_floor, floor)
+            for floor in (1, 2, 1, 0):          # trocas interrompendo o slide em andamento
+                self.island.go_to_floor(floor)
+                QTest.qWait(30)
+            QTest.qWait(T.SLIDE_MS + 120)
+            self.assertEqual(self.island.stack.currentIndex(), 0)
+            # Expandir com mídia tocando usa a troca imediata (set_index → _stop).
+            self.island.collapse()
+            QTest.qWait(T.COLLAPSE_MS + 120)
+            self.island.update_media(_media(playing=True))
+            self.island.expand()
+            self.assertEqual(self.island.stack.currentIndex(), DynamicIsland.FLOOR_MEDIA)
+        self.assertEqual(errors, [])
+
+    def test_hover_cycles_do_not_accumulate_animation_objects(self):
+        from PyQt6.QtCore import QAbstractAnimation
+        self.island.show()
+        for _ in range(15):
+            self.island.expand()
+            QTest.qWait(10)
+            self.island.collapse()
+            QTest.qWait(10)
+        QTest.qWait(T.COLLAPSE_MS + 120)
+        live = self.island.findChildren(QAbstractAnimation)
+        self.assertLess(len(live), 12)   # antes: ~4 objetos novos a cada hover, nunca liberados
+
     def test_mic_button_only_requests_the_change(self):
         requested = []
         self.island.mic_toggled.connect(requested.append)

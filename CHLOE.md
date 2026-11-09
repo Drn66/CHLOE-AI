@@ -54,12 +54,22 @@ Com o ambiente `.venv` instalado, o botão **Criar atalho na área de trabalho**
 gera **CHLOE AI**, usando `.venv\Scripts\pythonw.exe` e `launch_chloe.py`.
 O inicializador executa `main.py` na pasta do projeto, sem terminal. Se já
 houver uma instância aberta nessa pasta, o atalho tenta trazê-la para frente.
+Se essa instância foi aberta antes da última edição do código, ela ainda roda a
+versão antiga: o atalho avisa e oferece reiniciar com a versão atual.
 Feche pelo **X** da janela ou **Alt+F4**. O atalho não ativa início automático.
 
 Falhas de execução são exibidas em uma caixa de diálogo; `logs/launcher.log`
-registra somente horário, código do evento e código numérico de saída.
-Mensagens de exceção, saídas brutas e credenciais não são gravadas pelo
-inicializador. Mantenha a pasta do projeto e seu ambiente no mesmo local;
+registra horário, código do evento e código numérico de saída. Um erro interno
+que não encerra o app (em um evento da interface, numa thread ou numa tarefa
+asyncio) também é registrado com um código específico, como `ui_runtime_error`
+ou `worker_io_error`, e mais `ref`, thread, origem e a pilha de chamadas. A pilha
+mostra só arquivo relativo ao projeto, linha e função. Nesse caso o aviso diz
+que a CHLOE continua aberta e aparece uma vez por erro em cada sessão.
+Cada abertura registra também o interpretador, o script, a data do código
+carregado, o código de saída do processo da CHLOE e as últimas linhas do seu
+stderr nativo (Qt e falhas fatais do Python), com a pasta do usuário, query
+strings e chaves omitidas. Mensagens de exceção e credenciais não são gravadas
+pelo inicializador. Mantenha a pasta do projeto e seu ambiente no mesmo local;
 se movê-los, recrie o ambiente e o atalho no destino.
 
 ## Interface e inicialização
