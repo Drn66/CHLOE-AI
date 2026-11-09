@@ -34,7 +34,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush, QColor, QIcon, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QPalette, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 # Video playback for the HUD. Part of PyQt6, so it costs no new dependency —
 # but the multimedia plugins are a separate piece of the Qt install and can be
@@ -50,7 +50,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
     print(f"[Video] playback unavailable ({_e}) — the HUD will not show video.")
 
 from frontend.theme import C
-from frontend.particle_core import ParticleField
+from frontend.particle_core import ParticleField, ParticleOrb, ui_font
 from frontend.chat import ChatView, CommandInput
 from memory.ui_preferences import load_preferences, save_preferences
 from memory.config_manager import load_api_keys, update_config
@@ -465,7 +465,7 @@ class HudCanvas(QWidget):
         if not p.isActive():
             return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), qcol(C.BG))
+        p.fillRect(self.rect(), qcol(C.CARD))      # mesma cor do palco (StageCard)
         self._particles.paint(p, self.width(), self.height(), self._core_phase,
                               self._amp_disp, self.state, self.speaking,
                               self.muted, self.reduced_motion)
@@ -536,6 +536,61 @@ class MetricBar(QWidget):
 class LogWidget(ChatView):
     """Compatibility name for existing UI and plugin callers."""
     pass
+
+
+STAGE_PAD = 12      # respiro entre a borda do palco e a esfera
+
+
+class RoundedPanel(QWidget):
+    """Fundo arredondado pintado (o QSS não arredonda filhos de QSplitter)."""
+
+    def __init__(self, fill: QColor, radius: float = 28, border: QColor | None = None, parent=None):
+        super().__init__(parent)
+        self._fill = fill
+        self._radius = radius
+        self._border = border if border is not None else QColor(255, 255, 255, 13)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(self._border, 1))
+        p.setBrush(self._fill)
+        p.drawRoundedRect(r, self._radius, self._radius)
+        p.end()
+
+
+class StageCard(RoundedPanel):
+    """Palco da esfera: cartão #0A0A0D com a esfera e os controles de voz."""
+
+    def __init__(self, parent=None):
+        super().__init__(qcol(C.CARD), 28, QColor(255, 255, 255, 13), parent)
+
+
+class GlassPanel(RoundedPanel):
+    """Painel em vidro escuro (conversa). O desfoque real vem da janela (DWM)."""
+
+    def __init__(self, parent=None):
+        super().__init__(QColor(28, 28, 34, 200), 28, QColor(255, 255, 255, 20), parent)
+
+
+class GlassBar(QWidget):
+    """Barra superior em vidro com uma linha fina embaixo."""
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(20, 20, 26, 184))
+        p.fillRect(QRectF(0, self.height() - 1, self.width(), 1), QColor(255, 255, 255, 18))
+        p.end()
+
+
+def pill_style(fg: str, bg: str, hover: str, radius: int = 22, border: str = "transparent",
+               weight: int = 500, px: int = 13) -> str:
+    return (f"QPushButton {{ color: {fg}; background: {bg}; border: 1px solid {border};"
+            f" border-radius: {radius}px; padding: 0 18px; font-size: {px}px; font-weight: {weight}; }}"
+            f" QPushButton:hover {{ background: {hover}; }}"
+            f" QPushButton:focus {{ border-color: {C.PRI}; }}")
 
 
 _FILE_ICONS = {
@@ -668,6 +723,29 @@ class _DropCanvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         z    = self._z
         W, H = self.width(), self.height()
+        if W <= 64:
+            # Botão redondo do design: "+", anel azul ao arrastar, verde com anexo.
+            rect = QRectF(0.5, 0.5, W - 1, H - 1)
+            fill = QColor(255, 255, 255, 36 if (z._hovering or z._drag_over) else 20)
+            ring = (qcol(C.GREEN, 220) if z._current_file else qcol(C.PRI, 230) if z._drag_over
+                    else QColor(0, 0, 0, 0))
+            pen = QPen(ring, 1.5, Qt.PenStyle.DashLine if z._drag_over else Qt.PenStyle.SolidLine)
+            pen.setDashOffset(z._dash_offset)
+            p.setPen(pen)
+            p.setBrush(fill)
+            p.drawEllipse(rect)
+            plus = QPen(qcol(C.GREEN if z._current_file else C.TEXT), 1.8)
+            plus.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(plus)
+            c, k = rect.center(), W * 0.17
+            if z._current_file:            # anexo pronto: um "✓"
+                p.drawPolyline([QPointF(c.x() - k, c.y()), QPointF(c.x() - k * 0.25, c.y() + k * 0.75),
+                                QPointF(c.x() + k, c.y() - k * 0.7)])
+            else:
+                p.drawLine(QPointF(c.x() - k, c.y()), QPointF(c.x() + k, c.y()))
+                p.drawLine(QPointF(c.x(), c.y() - k), QPointF(c.x(), c.y() + k))
+            p.end()
+            return
         pad  = 6
         rect = QRectF(pad, pad, W - pad * 2, H - pad * 2)
 
@@ -746,7 +824,7 @@ class _DropCanvas(QWidget):
 
     def mousePressEvent(self, e):
         z = self._z
-        if z._current_file and e.pos().x() > self.width() - 34:
+        if z._current_file and self.width() > 64 and e.pos().x() > self.width() - 34:
             z.clear_file()
         else:
             z.mousePressEvent(e)
@@ -2496,19 +2574,23 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
+        # Foco inicial no fundo: nenhum botão abre a janela com contorno de foco.
+        central.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        QTimer.singleShot(0, central.setFocus)
         self.setCentralWidget(central)
 
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_header())
-        root.addWidget(self._build_system_strip())
 
         body = QSplitter(Qt.Orientation.Horizontal)
         self._main_body = body
-        body.setHandleWidth(6)
+        body.setHandleWidth(16)          # o vão entre o palco e a conversa é a alça
         body.setChildrenCollapsible(False)
-        body.setStyleSheet(f"QSplitter::handle {{ background: {C.BORDER}; }} QSplitter::handle:hover {{ background: {C.PRI_DIM}; }}")
+        body.setStyleSheet("QSplitter { background: transparent; }"
+                           " QSplitter::handle { background: transparent; }"
+                           " QSplitter::handle:hover { background: rgba(255,255,255,10); border-radius: 4px; }")
 
         self._left_panel = self._build_left_panel()
         self._left_panel.setParent(central)
@@ -2677,18 +2759,29 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
         self._hud_cam_stack.addWidget(self._video_cont)
+        # Sem isto, o aviso de vídeo indisponível (uma linha longa) impunha 744 px
+        # de mínimo ao palco e travava o divisor da conversa.
+        self._hud_cam_stack.setMinimumWidth(260)
+
+        # Palco: cartão arredondado com a esfera (ou câmera/vídeo) e, embaixo,
+        # os controles de voz — que continuam aí com a conversa recolhida.
+        self._stage = StageCard()
+        stage_lay = QVBoxLayout(self._stage)
+        stage_lay.setContentsMargins(STAGE_PAD, STAGE_PAD, STAGE_PAD, 18)
+        stage_lay.setSpacing(10)
+        stage_lay.addWidget(self._hud_cam_stack, stretch=1)
+        voice_row = self._build_audio_controls()
+        voice_row.insertStretch(0, 1)
+        voice_row.addStretch(1)
+        stage_lay.addLayout(voice_row)
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
-        self._center_split.setStyleSheet(f"""
-            QSplitter::handle {{
-                background: {C.BORDER};
-                height: 4px;
-            }}
-            QSplitter::handle:hover {{
-                background: {C.PRI_DIM};
-            }}
-        """)
-        self._center_split.addWidget(self._hud_cam_stack)
+        self._center_split.setHandleWidth(12)
+        self._center_split.setStyleSheet(
+            "QSplitter { background: transparent; }"
+            " QSplitter::handle { background: transparent; }"
+            " QSplitter::handle:hover { background: rgba(255,255,255,10); }")
+        self._center_split.addWidget(self._stage)
         self._center_split.addWidget(self._content_panel)
         self._center_split.addWidget(self._quiz_panel)
         self._center_split.setStretchFactor(0, 3)
@@ -2702,7 +2795,12 @@ class MainWindow(QMainWindow):
         body.setStretchFactor(1, 0)
         body.splitterMoved.connect(self._remember_chat_width)
 
-        root.addWidget(body, stretch=1)
+        body_wrap = QWidget()
+        body_wrap.setStyleSheet("background: transparent;")
+        wrap_lay = QVBoxLayout(body_wrap)
+        wrap_lay.setContentsMargins(16, 16, 16, 0)
+        wrap_lay.addWidget(body)
+        root.addWidget(body_wrap, stretch=1)
         root.addWidget(self._build_footer())
         self._set_chat_visible(not self._chat_collapsed, persist=False)
         QTimer.singleShot(0, self._layout_chat)
@@ -3463,73 +3561,130 @@ class MainWindow(QMainWindow):
             self._proc_lbl.setText("PROC  --")
 
 
+    # Estilo dos botões do controle segmentado (barra superior).
+    _SEG_STYLE = (f"QPushButton {{ color: #e4e4ea; background: transparent; border: 1px solid transparent;"
+                  f" border-radius: 17px; padding: 0 16px; font-size: 13px; font-weight: 500; }}"
+                  f" QPushButton:hover {{ background: rgba(255,255,255,15); }}"
+                  f" QPushButton:checked {{ color: {C.TEXT}; background: rgba(255,255,255,41); font-weight: 600; }}"
+                  f" QPushButton:focus {{ border-color: {C.PRI}; }}")
+
     def _build_header(self) -> QWidget:
-        w = QWidget()
-        w.setMinimumHeight(62)
-        w.setStyleSheet(f"background: {C.BG}; border: none;")
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(20, 10, 20, 10)
-        identity = QVBoxLayout()
+        w = GlassBar()
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(20, 12, 20, 12)
+        outer.setSpacing(10)
+        top = QHBoxLayout()
+        top.setSpacing(16)
+
+        identity = QHBoxLayout()
+        identity.setSpacing(10)
+        self._mark_orb = ParticleOrb(26)
+        identity.addWidget(self._mark_orb)
         self._title_lbl = QLabel("CHLOE AI")
-        self._title_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.DemiBold))
-        self._title_lbl.setStyleSheet(f"color: {C.WHITE}; border: none;")
-        self._sub_lbl = QLabel("Sem conexão")
-        self._sub_lbl.setFont(QFont("Segoe UI", 9))
-        self._sub_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; border: none;")
+        title_font = ui_font(11.5, QFont.Weight.Bold)
+        title_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 104)
+        self._title_lbl.setFont(title_font)
+        self._title_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent; border: none;")
         identity.addWidget(self._title_lbl)
+        self._sub_lbl = QLabel("Sem conexão")
+        self._sub_lbl.setFont(ui_font(9, QFont.Weight.DemiBold))
+        self._sub_lbl.setFixedHeight(24)
         identity.addWidget(self._sub_lbl)
-        lay.addLayout(identity)
-        lay.addStretch()
+        self._style_connection_chip("DISCONNECTED")
+        top.addLayout(identity)
+        top.addStretch(1)
+
+        self._metrics_strip = self._build_system_strip()
+        top.addWidget(self._metrics_strip)      # vai para a 2ª linha em janelas estreitas
+        self._metrics_spacer = QWidget()
+        self._metrics_spacer.setStyleSheet("background: transparent;")
+        top.addWidget(self._metrics_spacer, 1)
+
         self._date_lbl = QLabel()
         self._date_lbl.hide()
-        style = f"""QPushButton {{ color: {C.TEXT_MED}; background: {C.BG};
-            border: 1px solid transparent; border-radius: 7px; padding: 8px 16px; }}
-            QPushButton:hover, QPushButton:checked {{ color: {C.TEXT}; background: {C.PRI_GHO}; }}
-            QPushButton:focus {{ border-color: {C.PRI}; }}"""
-        self._chat_toggle_btn = self._make_chat_toggle("Conversa", "Mostrar conversa")
+        nav = QWidget()
+        nav.setObjectName("segmented")
+        nav.setStyleSheet("QWidget#segmented { background: rgba(255,255,255,15); border-radius: 21px; }")
+        nav_lay = QHBoxLayout(nav)
+        nav_lay.setContentsMargins(4, 4, 4, 4)
+        nav_lay.setSpacing(4)
+
+        def seg(text: str, checkable: bool = False) -> QPushButton:
+            b = QPushButton(text)
+            b.setFixedHeight(34)
+            b.setCheckable(checkable)
+            b.setFocusPolicy(Qt.FocusPolicy.TabFocus)   # contorno só ao navegar pelo teclado
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFont(ui_font(10))
+            b.setStyleSheet(self._SEG_STYLE)
+            nav_lay.addWidget(b)
+            return b
+
+        self._chat_toggle_btn = self._make_chat_toggle("Conversa", "Mostrar conversa", nav)
+        nav_lay.addWidget(self._chat_toggle_btn)
         self._chat_toggle_btn.setCheckable(True)
         self._chat_toggle_btn.clicked.connect(lambda: self._set_chat_visible(self._chat_collapsed))
-        lay.addWidget(self._chat_toggle_btn)
-        self._island_btn = QPushButton("Ilha")
+        self._island_btn = seg("Ilha")
         self._island_btn.setToolTip("Recolher a CHLOE para a Ilha Dinâmica no topo da tela")
         self._island_btn.setAccessibleName("Recolher para a Ilha Dinâmica")
-        self._island_btn.setStyleSheet(style)
         self._island_btn.clicked.connect(self.enter_island_mode)
-        lay.addWidget(self._island_btn)
-        key_btn = QPushButton("API")
+        key_btn = seg("API")
         key_btn.setToolTip("Configurar a conexão com Gemini")
-        key_btn.setStyleSheet(style)
         key_btn.clicked.connect(self._show_setup)
-        lay.addWidget(key_btn)
-        self._ctrl_btn = QPushButton("Controles")
-        self._ctrl_btn.setCheckable(True)
-        self._ctrl_btn.setStyleSheet(style)
+        self._ctrl_btn = seg("Controles", checkable=True)
         self._ctrl_btn.clicked.connect(self._toggle_controls)
-        lay.addWidget(self._ctrl_btn)
-        self._drawer_btn = QPushButton("Configurações")
-        self._drawer_btn.setCheckable(True)
-        self._drawer_btn.setStyleSheet(style)
+        self._drawer_btn = seg("Configurações", checkable=True)
         self._drawer_btn.clicked.connect(self._toggle_drawer)
-        lay.addWidget(self._drawer_btn)
+        top.addWidget(nav)
+        outer.addLayout(top)
+
+        self._header_top = top
+        self._header_row2 = QHBoxLayout()
+        self._header_row2.setSpacing(6)
+        self._header_row2.addStretch(1)
+        outer.addLayout(self._header_row2)
+        self._metrics_wide = True
         return w
+
+    def _style_connection_chip(self, state: str) -> None:
+        fg, bg = {"CONNECTED": ("#6be38a", "rgba(48,209,88,36)"),
+                  "CONNECTING": ("#ffd60a", "rgba(255,214,10,30)")}.get(state, (C.TEXT_DIM, "rgba(255,255,255,15)"))
+        self._sub_lbl.setStyleSheet(f"color: {fg}; background: {bg}; border: none;"
+                                    " border-radius: 12px; padding: 0 10px;")
+
+    def _layout_header(self) -> None:
+        """Métricas ao centro da barra; abaixo dela quando a janela é estreita."""
+        wide = self.width() >= 1100
+        if wide == getattr(self, "_metrics_wide", True):
+            return
+        self._metrics_wide = wide
+        strip = self._metrics_strip
+        if wide:
+            self._header_row2.removeWidget(strip)
+            self._header_top.insertWidget(2, strip)
+            self._metrics_spacer.show()
+        else:
+            self._header_top.removeWidget(strip)
+            self._header_row2.insertWidget(0, strip)
+            self._metrics_spacer.hide()
 
     def _build_system_strip(self) -> QWidget:
         w = QWidget()
+        w.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(20, 4, 20, 8)
-        lay.setSpacing(24)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        pill = ("QLabel { color: #e4e4ea; background: rgba(255,255,255,15); border: none;"
+                " border-radius: 15px; padding: 0 12px; }")
         self._clock_lbl = QLabel()
-        self._system_labels = {}
-        lay.addWidget(self._clock_lbl)
-        for key, title in (("cpu", "CPU"), ("mem", "RAM"), ("gpu", "GPU")):
-            label = QLabel(f"{title} · Indisponível")
-            label.setFont(QFont("Segoe UI", 10))
-            label.setStyleSheet(f"color: {C.TEXT_MED};")
-            self._system_labels[key] = label
+        self._system_labels = {key: QLabel(f"{title} · Indisponível")
+                               for key, title in (("cpu", "CPU"), ("mem", "RAM"), ("gpu", "GPU"))}
+        for label in (self._clock_lbl, *self._system_labels.values()):
+            label.setFont(ui_font(9.5, QFont.Weight.Medium))
+            label.setFixedHeight(30)
+            label.setStyleSheet(pill)
             lay.addWidget(label)
-        self._clock_lbl.setFont(QFont("Segoe UI", 10))
-        self._clock_lbl.setStyleSheet(f"color: {C.TEXT_MED};")
-        lay.addStretch()
+        self._clock_lbl.setFont(ui_font(9.5, QFont.Weight.DemiBold))
         return w
 
     def _tick_clock(self):
@@ -3600,24 +3755,19 @@ class MainWindow(QMainWindow):
         return w
     def _make_chat_toggle(self, text: str, label: str, parent=None) -> QPushButton:
         button = QPushButton(text, parent)
-        button.setMinimumSize(96, 36)
-        button.setFont(QFont("Segoe UI", 10))
+        button.setFixedHeight(34)
+        button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        button.setFont(ui_font(10))
         button.setAccessibleName(label)
         button.setToolTip(label)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setStyleSheet(
-            f"QPushButton {{ color: {C.TEXT_MED}; background: {C.PANEL}; "
-            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 5px 10px; }} "
-            f"QPushButton:hover {{ color: {C.TEXT}; background: {C.PRI_GHO}; }} "
-            f"QPushButton:focus {{ color: {C.TEXT}; border-color: {C.PRI}; }}"
-        )
+        button.setStyleSheet(self._SEG_STYLE)
         return button
 
     def _set_chat_visible(self, visible: bool, persist: bool = True):
         self._chat_collapsed = not visible
         self._right_panel.setVisible(visible)
-        self._chat_toggle_btn.setChecked(visible)
-        self._chat_toggle_btn.setText("Ocultar conversa" if visible else "Conversa")
+        self._chat_toggle_btn.setChecked(visible)    # segmentado: "Conversa" aceso = aberta
         self._chat_toggle_btn.setToolTip("Ocultar conversa" if visible else "Mostrar conversa")
         self._chat_toggle_btn.setAccessibleName(self._chat_toggle_btn.toolTip())
         if persist:
@@ -3630,64 +3780,79 @@ class MainWindow(QMainWindow):
             save_preferences({"chat_width": self._chat_width})
 
     def _layout_chat(self):
+        self._layout_header()
         narrow = self.width() < 760
         compact_chat = narrow and not getattr(self, "_chat_collapsed", False)
         self._main_body.setOrientation(Qt.Orientation.Vertical if compact_chat else Qt.Orientation.Horizontal)
-        self._center_split.setMaximumHeight(210 if compact_chat else 16777215)
-        self._drop_zone.setFixedHeight(44)
+        self._center_split.setMaximumHeight(260 if compact_chat else 16777215)
+        self._drop_zone.setFixedSize(44, 44)
         self._file_hint.setVisible(bool(self._current_file))
         if not self._chat_collapsed:
             if compact_chat:
                 self._main_body.setSizes([180, max(240, self.height() - 330)])
             else:
-                width = min(self._chat_width, max(300, self.width() - 320))
-                self._main_body.setSizes([max(260, self.width() - width - 6), width])
+                # Largura real do corpo (sem as margens de 16 px) menos a alça:
+                # somas maiores fazem o QSplitter encolher tudo proporcionalmente.
+                body_w = self._main_body.width() or (self.width() - 32)
+                usable = body_w - self._main_body.handleWidth()
+                width = min(self._chat_width, max(300, usable - 320))
+                self._main_body.setSizes([max(260, usable - width), width])
 
     def _build_right_panel(self) -> QWidget:
-        w = QWidget()
+        w = GlassPanel()
         w.setMinimumWidth(300)
-        w.setStyleSheet(f"background: {C.BG}; border: none;")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(14, 8, 14, 12)
+        lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(8)
         title = QLabel("Conversa")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
-        title.setStyleSheet(f"color: {C.TEXT}; border: none;")
+        title.setFont(ui_font(13, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {C.TEXT}; background: transparent; border: none;")
         heading = QHBoxLayout()
+        heading.setContentsMargins(4, 0, 4, 0)
         heading.addWidget(title)
         heading.addStretch()
         lay.addLayout(heading)
         self._log = LogWidget()
         self._playback_label = QLabel("Voz · aguardando conexão")
         self._playback_label.setWordWrap(True)
-        self._playback_label.setFont(QFont("Segoe UI", 9))
-        self._playback_label.setStyleSheet(f"color: {C.TEXT_DIM}; border: none;")
+        self._playback_label.setFont(ui_font(9))
+        self._playback_label.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none; padding: 0 4px;")
         lay.addWidget(self._playback_label)
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet("background: rgba(255,255,255,15); border: none;")
+        lay.addWidget(divider)
         self._log._ai_name_lc = self._assistant_name.lower()
         lay.addWidget(self._log, stretch=1)
-        self._drop_zone = FileDropZone()
-        self._drop_zone.setToolTip("Clique para anexar ou arraste um arquivo até aqui")
-        self._drop_zone.setFixedHeight(68)
-        self._drop_zone.file_selected.connect(self._on_file_selected)
-        lay.addWidget(self._drop_zone)
         self._file_hint = QLabel("Anexe um arquivo para conversar sobre ele")
         self._file_hint.setWordWrap(True)
         self._file_hint.hide()
-        self._file_hint.setStyleSheet(f"color: {C.TEXT_DIM}; border: none; font-size: 11px;")
+        self._file_hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;"
+                                      " font-size: 11px; padding: 0 4px;")
         lay.addWidget(self._file_hint)
+        divider2 = QFrame()
+        divider2.setFixedHeight(1)
+        divider2.setStyleSheet("background: rgba(255,255,255,15); border: none;")
+        lay.addWidget(divider2)
         lay.addLayout(self._build_input_row())
         return w
 
     def _build_audio_controls(self) -> QHBoxLayout:
         controls = QHBoxLayout()
+        controls.setSpacing(12)
         self._mute_btn = QPushButton()
-        self._mute_btn.setMinimumHeight(40)
+        self._mute_btn.setFixedHeight(44)
+        self._mute_btn.setFont(ui_font(10, QFont.Weight.DemiBold))
+        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mute_btn.clicked.connect(self._toggle_mute)
         self._style_mute_btn()
         controls.addWidget(self._mute_btn)
         self._interrupt_btn = QPushButton("Interromper · Esc")
-        self._interrupt_btn.setMinimumHeight(40)
-        self._interrupt_btn.setStyleSheet(f"QPushButton {{ color: {C.ACC}; background: {C.BG}; border: 1px solid transparent; border-radius: 8px; padding: 6px 12px; }} QPushButton:hover {{ background: {C.PRI_GHO}; }} QPushButton:focus {{ border-color: {C.PRI}; }}")
+        self._interrupt_btn.setFixedHeight(44)
+        self._interrupt_btn.setFont(ui_font(10, QFont.Weight.Medium))
+        self._interrupt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._interrupt_btn.setStyleSheet(pill_style(C.TEXT, "rgba(255,255,255,15)", "rgba(255,255,255,31)",
+                                                     border="rgba(255,255,255,26)"))
         self._interrupt_btn.clicked.connect(self._do_interrupt)
         controls.addWidget(self._interrupt_btn)
         return controls
@@ -3942,21 +4107,43 @@ class MainWindow(QMainWindow):
 
     def _build_input_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(8)
+        self._drop_zone = FileDropZone()
+        self._drop_zone.setToolTip("Anexar arquivo — clique ou arraste até aqui")
+        self._drop_zone.setAccessibleName("Anexar arquivo")
+        self._drop_zone.setFixedSize(44, 44)
+        self._drop_zone.file_selected.connect(self._on_file_selected)
+        row.addWidget(self._drop_zone, 0, Qt.AlignmentFlag.AlignBottom)
         self._input = CommandInput()
         self._input.setPlaceholderText("Escreva para a CHLOE…")
         self._input.setAccessibleName("Mensagem para CHLOE AI")
-        self._input.setFont(QFont("Segoe UI", 11))
-        self._input.setFixedHeight(76)
-        self._input.setStyleSheet(f"QPlainTextEdit {{ color: {C.TEXT}; background: {C.BG}; border: 1px solid {C.BORDER_B}; border-radius: 10px; padding: 10px; }} QPlainTextEdit:focus {{ border-color: {C.PRI}; }}")
+        self._input.setFont(ui_font(10.5))
+        self._input.setFixedHeight(44)
+        self._input.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._input.document().setDocumentMargin(2)
+        pal = self._input.palette()
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(C.TEXT_DIM))
+        self._input.setPalette(pal)
+        self._input.setStyleSheet(
+            f"QPlainTextEdit {{ color: {C.TEXT}; background: rgba(255,255,255,20);"
+            f" border: 1px solid transparent; border-radius: 22px; padding: 9px 14px; }}"
+            f" QPlainTextEdit:focus {{ border-color: {C.PRI}; }}")
         self._input.returnPressed.connect(self._send)
         row.addWidget(self._input, stretch=1)
-        send = QPushButton("Enviar")
-        send.setFixedSize(76, 76)
+        send = QPushButton("")          # Send (Segoe Fluent Icons / MDL2 Assets)
+        icon_font = QFont()
+        icon_font.setFamilies(["Segoe Fluent Icons", "Segoe MDL2 Assets"])
+        icon_font.setPixelSize(16)
+        send.setFont(icon_font)
+        send.setFixedSize(44, 44)
+        send.setCursor(Qt.CursorShape.PointingHandCursor)
         send.setAccessibleName("Enviar mensagem")
-        send.setStyleSheet(f"QPushButton {{ color: {C.PRI}; background: {C.BG}; border: 1px solid {C.BORDER_B}; border-radius: 10px; font-weight: 600; }} QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }} QPushButton:focus {{ border-color: {C.ACC}; }}")
+        send.setToolTip("Enviar · Enter")
+        send.setStyleSheet(f"QPushButton {{ color: #001a26; background: {C.PRI}; border: 1px solid transparent;"
+                           f" border-radius: 22px; }} QPushButton:hover {{ background: #8fdfff; }}"
+                           f" QPushButton:focus {{ border-color: {C.WHITE}; }}")
         send.clicked.connect(self._send)
-        row.addWidget(send)
+        row.addWidget(send, 0, Qt.AlignmentFlag.AlignBottom)
         return row
 
     def _build_content_panel(self) -> QWidget:
@@ -4424,25 +4611,24 @@ class MainWindow(QMainWindow):
 
     def _build_footer(self) -> QWidget:
         w = QWidget()
+        w.setStyleSheet("background: transparent;")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(20, 6, 20, 10)
-        controls = self._build_audio_controls()
-        controls.addStretch()
+        lay.setContentsMargins(24, 8, 24, 10)
+        lay.setSpacing(4)
         self._greeting_label = QLabel()
         self._greeting_label.setWordWrap(True)
-        self._greeting_label.setFont(QFont("Segoe UI", 10))
+        self._greeting_label.setFont(ui_font(9.5))
         self._greeting_label.setStyleSheet(f"color: {C.TEXT_MED};")
         self._greeting_label.hide()
         lay.addWidget(self._greeting_label)
-        lay.addLayout(controls)
         info = QHBoxLayout()
-        hint = QLabel("F11 · Tela cheia   |   Shift+Enter · Nova linha")
-        hint.setFont(QFont("Segoe UI", 9))
+        hint = QLabel("F11 · Tela cheia   ·   Shift+Enter · Nova linha")
+        hint.setFont(ui_font(8.5))
         hint.setStyleSheet(f"color: {C.TEXT_DIM};")
         info.addWidget(hint)
         info.addStretch()
         credit = QLabel("Base MARK LV · FatihMakes")
-        credit.setFont(QFont("Segoe UI", 9))
+        credit.setFont(ui_font(8.5))
         credit.setStyleSheet(f"color: {C.TEXT_DIM};")
         credit.setToolTip("CHLOE AI deriva de MARK LV, de FatihMakes. Licença original preservada no arquivo LICENSE.")
         info.addWidget(credit)
@@ -5099,12 +5285,15 @@ class MainWindow(QMainWindow):
             self._island.hide()
 
     def _island_sync_state(self) -> None:
-        island = getattr(self, "_island", None)
-        if island is None:
-            return
         key = self._ISLAND_STATES.get(getattr(self.hud, "state", ""), "listening")
         if key == "listening" and self._muted:
             key = "muted"
+        mark = getattr(self, "_mark_orb", None)
+        if mark is not None:
+            mark.set_state(key)          # a esfera do cabeçalho segue a da HUD
+        island = getattr(self, "_island", None)
+        if island is None:
+            return
         island.set_assistant_state(key)
 
     def _island_on_log(self, text: str) -> None:
@@ -5187,16 +5376,17 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: Microphone active." + (f" {note}" if note else ""))
 
     def _style_mute_btn(self):
+        glass = ("rgba(255,255,255,15)", "rgba(255,255,255,31)")
         if not getattr(self, "_connected", False):
-            label, colour = "Microfone · sem conexão", C.TEXT_DIM
+            label, fg, (bg, hover) = "Microfone · sem conexão", C.TEXT_DIM, glass
         elif getattr(self, "_mic_available", None) is False:
-            label, colour = "Microfone indisponível · use o chat", C.TEXT_DIM
+            label, fg, (bg, hover) = "Microfone indisponível · use o chat", C.TEXT_DIM, glass
         elif self._muted:
-            label, colour = "Microfone desativado", C.MUTED_C
+            label, fg, (bg, hover) = "Microfone desativado · F4", C.RED, ("rgba(255,105,97,40)", "rgba(255,105,97,64)")
         else:
-            label, colour = "Microfone ativado · F4", C.PRI
+            label, fg, (bg, hover) = "Microfone ativado · F4", "#001a26", (C.PRI, "#8fdfff")
         self._mute_btn.setText(label)
-        self._mute_btn.setStyleSheet(f"QPushButton {{ color: {colour}; background: {C.BG}; border: 1px solid transparent; border-radius: 8px; padding: 6px 12px; }} QPushButton:hover {{ background: {C.PRI_GHO}; }} QPushButton:focus {{ border-color: {C.PRI}; }}")
+        self._mute_btn.setStyleSheet(pill_style(fg, bg, hover, weight=600))
 
     def _send(self):
         txt = self._input.text().strip()
@@ -5270,6 +5460,7 @@ class MainWindow(QMainWindow):
         self._connection_state = state if state in ("CONNECTING", "CONNECTED", "DISCONNECTED") else "DISCONNECTED"
         self._connected = self._connection_state == "CONNECTED"
         self._sub_lbl.setText({"CONNECTING": "Conectando…", "CONNECTED": "Conectada", "DISCONNECTED": "Sem conexão"}[self._connection_state])
+        self._style_connection_chip(self._connection_state)
         self._apply_state("LISTENING" if self._connected else self._connection_state)
         self._refresh_playback_status()
 
@@ -5449,6 +5640,9 @@ class JarvisUI:
             self._win.hud.set_audio_level(level)
         except Exception:
             pass
+        mark = getattr(self._win, "_mark_orb", None)
+        if mark is not None:
+            mark.set_level(level)           # só grava um float, como o HUD
         island = getattr(self._win, "_island", None)
         if island is not None:
             island.set_voice_level(level)   # só grava um float no orbe, como o HUD

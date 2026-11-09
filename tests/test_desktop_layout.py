@@ -84,7 +84,8 @@ class DesktopLayoutTests(unittest.TestCase):
         self.assertFalse(window._right_panel.isVisible())
         self.assertTrue(window._chat_toggle_btn.isVisible())
         self.assertEqual(window._chat_toggle_btn.accessibleName(), "Mostrar conversa")
-        self.assertGreaterEqual(window.hud.width(), window._main_body.width() - 2)
+        # A esfera ocupa o palco inteiro (menos o respiro do cartão arredondado).
+        self.assertGreaterEqual(window.hud.width(), window._main_body.width() - 2 * ui.STAGE_PAD - 2)
         center = window.hud.mapTo(window._main_body, QPoint(window.hud.width() // 2, 0))
         self.assertAlmostEqual(center.x(), window._main_body.width() / 2, delta=2)
         self.assertFalse(self.preferences_path.exists())

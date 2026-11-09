@@ -171,13 +171,14 @@ class ParticleField:
         # A legenda fica presa ao layout, nunca ao pulso da voz.
         compact = height < 300
         sy = height - 34 if compact else min(cy + base_radius * 1.45, height - 96)
+        # Espaçamento absoluto e texto já em maiúsculas: o percentual com
+        # AllUppercase quebrava "PRONTA" em "PRON TA" na Segoe UI Variable.
         eyebrow_font = ui_font(8.5, QFont.Weight.Bold)
-        eyebrow_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 112)
-        eyebrow_font.setCapitalization(QFont.Capitalization.AllUppercase)
+        eyebrow_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
         if not compact:
             p.setFont(eyebrow_font)
             p.setPen(QPen(col if mode != "rest" else QColor(C.TEXT_DIM)))
-            p.drawText(QRectF(8, sy, width - 16, 18), Qt.AlignmentFlag.AlignCenter, eyebrow)
+            p.drawText(QRectF(8, sy, width - 16, 18), Qt.AlignmentFlag.AlignCenter, eyebrow.upper())
             sy += 22
         p.setFont(ui_font(13 if compact else 17, QFont.Weight.Light))
         p.setPen(QColor("#f5f5f7"))
