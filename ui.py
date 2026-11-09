@@ -3445,6 +3445,13 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_chrome_applied", False):
+            self._chrome_applied = True
+            from frontend.win_chrome import apply_dark_titlebar
+            apply_dark_titlebar(self)          # barra de título escura; no-op fora do Windows
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         cw = self.centralWidget()

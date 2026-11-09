@@ -74,6 +74,13 @@ se movê-los, recrie o ambiente e o atalho no destino.
 
 ## Interface e inicialização
 
+O visual segue o design "CHLOE AI — Design Premium": fundo preto profundo,
+painéis em vidro escuro, cantos arredondados e um destaque azul. A esfera de
+partículas é a mesma na janela, no cabeçalho e na Ilha, gira devagar e pulsa
+com a voz. A cor diz quem está falando: **cinza** em repouso, **azul** quando
+você fala, **rosa** quando a CHLOE fala e **roxo** enquanto ela pensa. No
+Windows 10 (20H1+) e 11 a barra de título também fica escura.
+
 A conversa começa recolhida em instalações novas. Use **Conversa**, no topo,
 para abrir ou ocultar o painel; arraste o divisor para ajustar sua largura.
 A escolha e a largura ficam em `config/ui_preferences.json`, ignorado pelo Git
