@@ -151,6 +151,53 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                     await task
 
 
+    async def test_microphone_stays_closed_during_a_pause_in_an_unfinished_answer(self):
+        """Uma pausa de rede esvaziava o alto-falante, o microfone voltava a ser
+        enviado no meio da frase e o servidor podia cortar a resposta."""
+        import numpy as np
+        from core.echo import EchoGuard
+
+        a = self.assistant
+        a._speaking_lock = threading.Lock()
+        a._is_speaking = a._output_writing = False
+        a._ptt_enabled = a._ptt_held = a._phone_active = False
+        a._tail_until = 0.0
+        a._echo = EchoGuard()
+        a.out_queue = Mock()
+        captured = {}
+
+        def fake_input(**kwargs):
+            captured["callback"] = kwargs["callback"]
+            return MagicMock()
+
+        with patch("main.audio_devices.resolve", return_value=None), patch(
+                "main.sd.InputStream", side_effect=fake_input):
+            task = asyncio.create_task(a._listen_audio())
+            try:
+                for _ in range(50):
+                    await asyncio.sleep(0.01)
+                    if "callback" in captured:
+                        break
+                block = np.full((1024, 1), 3000, dtype=np.int16)
+                a._response_audio_open = True
+                a._last_audio_at = time.monotonic()           # pausa de 0 s numa resposta aberta
+                captured["callback"](block, 1024, None, None)
+                await asyncio.sleep(0.02)
+                a.out_queue.put_nowait.assert_not_called()
+                a._last_audio_at = time.monotonic() - 3.0    # turn_complete perdido: não trava
+                captured["callback"](block, 1024, None, None)
+                await asyncio.sleep(0.02)
+                a.out_queue.put_nowait.assert_called_once()
+                a._response_audio_open = False
+                captured["callback"](block, 1024, None, None)
+                await asyncio.sleep(0.02)
+                self.assertEqual(a.out_queue.put_nowait.call_count, 2)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+
 class Composer(QObject):
     _text_sent_sig = pyqtSignal(str, bool)
     _log_sig = pyqtSignal(str)

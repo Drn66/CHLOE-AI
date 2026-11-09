@@ -80,6 +80,12 @@ from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
+from core.voice_diag           import VoiceDiagnostics, default_diagnostics as default_voice_diagnostics
+
+# Quanto tempo depois do último pedaço de áudio de uma resposta inacabada o
+# microfone continua fechado. Cobre pausas de rede no meio da frase; passado
+# isso, um turn_complete perdido nunca deixa o microfone travado.
+_RESPONSE_HOLD = 2.0
 from core.wake_word            import (
     WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
 )
@@ -315,20 +321,45 @@ _REPEAT_MIN = 12
 
 
 def _is_repeat_chunk(txt: str, buf: list) -> bool:
-    """True if this transcript chunk has already been seen this turn.
+    """True if this chunk is the API re-sending the tail of what we already have.
 
-    Guards against the API re-sending the tail of a response across the several
-    turn_completes a tool-using turn produces.
+    The API re-sends the end of a response across the several turn_completes a
+    tool-using turn produces. Only that is dropped: a long chunk that the text
+    so far already ENDS with. The old rule dropped any chunk of 12+ characters
+    that appeared ANYWHERE earlier in the turn, and any short chunk equal to the
+    previous one — so a phrase or word said twice lost its second occurrence.
     """
-    if len(txt) < _REPEAT_MIN:
-        return bool(buf) and txt == buf[-1]
-    joined = " ".join(buf)
-    return txt in joined
+    core = txt.strip()
+    if len(core) < _REPEAT_MIN or not buf:
+        return False
+    return _join_transcript(buf).endswith(core)
 
-def _clean_transcript(text: str) -> str:    
+
+def _clean_transcript(text: str) -> str:
+    """Remove control characters but KEEP the chunk's own spaces.
+
+    Chunks can split a word ("tocan" + "do"); their leading/trailing spaces are
+    the only record of where words end. Stripping them and re-joining with a
+    space turned that into "tocan do".
+    """
     text = _CTRL_RE.sub("", text)
-    text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
-    return text.strip()
+    return re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
+
+
+def _join_transcript(chunks: list) -> str:
+    """Join transcript chunks into readable text.
+
+    When the chunks carry their own word boundaries (leading/trailing spaces),
+    concatenate them as sent; only if none of them does, fall back to one space
+    between chunks (whole-word chunks).
+    """
+    if not chunks:
+        return ""
+    carries_spaces = (any(c[:1].isspace() for c in chunks[1:])
+                      or any(c[-1:].isspace() for c in chunks[:-1]))
+    text = "".join(chunks) if carries_spaces else " ".join(c.strip() for c in chunks)
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r" ([,.!?;:])", r"\1", text)
 
 TOOL_DECLARATIONS = [
     # ── Inline tools ─────────────────────────────────────────────────────────
@@ -342,7 +373,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
             "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
+            "the computer's (CPU/GPU) temperature, memory, or resource usage. Never for the "
+            "weather or the temperature outside — that is weather_report."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -538,6 +570,13 @@ def _keep_context_of(exc: BaseException) -> bool:
 
 
 class JarvisLive:
+    # Padrões de classe: valem também para objetos montados sem __init__ (testes)
+    # e antes de a sessão começar. O __init__ troca o diagnóstico pelo que grava
+    # em logs/voice.log.
+    _response_audio_open = False
+    _last_audio_at = 0.0
+    _voice_diag = VoiceDiagnostics(None)
+
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
         self._asst_name     = "CHLOE AI"   # updated each session from config
@@ -556,6 +595,14 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # A resposta em áudio ainda está chegando (do 1º pedaço até o servidor
+        # dizer que terminou). Enquanto estiver aberta, o microfone não é enviado
+        # mesmo que o alto-falante tenha esvaziado numa pausa de rede: antes, essa
+        # pausa reabria o microfone no meio da frase e qualquer som (eco, ruído,
+        # um "uhum") fazia o servidor cortar a resposta.
+        self._response_audio_open  = False
+        self._last_audio_at        = 0.0
+        self._voice_diag           = default_voice_diagnostics()
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -979,6 +1026,8 @@ class JarvisLive:
         self._startup_user_interacted = True
         self._interrupted = True
         self._response_pending = False
+        self._response_audio_open = False
+        self._voice_diag.note_user_interrupt()
         q = self.audio_in_queue
         if q:
             drained = 0
@@ -1395,6 +1444,12 @@ class JarvisLive:
             # So the test is not "is the mic loud" but "is the mic louder than
             # the echo of what we are playing right now", sustained long enough
             # that a cough or a keystroke cannot trigger it.
+            if (not jarvis_speaking and self._response_audio_open
+                    and time.monotonic() - self._last_audio_at < _RESPONSE_HOLD):
+                # O alto-falante esvaziou numa pausa de rede, mas a resposta
+                # ainda não terminou: o microfone continua fechado.
+                self._voice_diag.note_mic_held()
+                return
             if jarvis_speaking:
                 # Nothing is streamed while JARVIS talks.
                 #
@@ -1568,15 +1623,27 @@ class JarvisLive:
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
                             # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
                             _audio_data = response.data
+                            self._response_audio_open = True
+                            self._last_audio_at = time.monotonic()
+                            self._voice_diag.note_audio(len(_audio_data))
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
 
                     if response.server_content:
                         sc = response.server_content
+                        if getattr(sc, "interrupted", False):
+                            # O servidor cortou a própria resposta (ouviu algo).
+                            # Antes isto passava sem registro nenhum.
+                            self._voice_diag.note_server_interrupted()
+                            self._response_audio_open = False
+                        if getattr(sc, "generation_complete", False):
+                            self._voice_diag.note_generation_complete()
+                            self._response_audio_open = False
 
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
+                            self._voice_diag.note_chunk(txt)
                             # A turn that involves a tool call passes through
                             # several turn_completes, and the API re-sends the
                             # tail of the transcript across them. Comparing only
@@ -1584,7 +1651,7 @@ class JarvisLive:
                             # out_buf had been flushed and emptied, the repeat
                             # sailed straight back in, which logged the answer
                             # twice AND made the avatar mouth it twice.
-                            if txt and not _is_repeat_chunk(txt, out_buf):
+                            if txt.strip() and not _is_repeat_chunk(txt, out_buf):
                                 out_buf.append(txt)
                                 # Hand the words to the mouth as they arrive, so
                                 # the avatar can form the consonants the audio
@@ -1594,13 +1661,15 @@ class JarvisLive:
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
-                            if txt:
+                            if txt.strip():
                                 in_buf.append(txt)
                                 self._startup_user_interacted = True
                                 self._last_user_speech = time.monotonic()
 
                         if sc.turn_complete:
                             self._response_pending = False
+                            self._response_audio_open = False
+                            self._voice_diag.turn_complete(RECEIVE_SAMPLE_RATE)
                             if not self._is_speaking:
                                 self._refresh_idle_state()
                             if self._turn_done_event:
@@ -1615,7 +1684,7 @@ class JarvisLive:
                                 self._visemes.reset()
                                 continue
 
-                            full_in = " ".join(in_buf).strip()
+                            full_in = _join_transcript(in_buf)
                             if full_in:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
@@ -1628,7 +1697,7 @@ class JarvisLive:
                                     }))
                             in_buf = []
 
-                            full_out = " ".join(out_buf).strip()
+                            full_out = _join_transcript(out_buf)
                             # Second line of defence: even if a repeat slips
                             # into a *fresh* buffer after a flush, never log the
                             # same answer (or a tail of it) twice in a row.
@@ -1657,6 +1726,10 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
+                        # A fala antes da ferramenta acabou; o microfone pode
+                        # voltar enquanto ela roda.
+                        self._response_audio_open = False
+                        self._voice_diag.note_tool_call()
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
@@ -1748,6 +1821,9 @@ class JarvisLive:
                     # A delayed server turn_complete is not ongoing playback.
                     # Keep the speech indicator only through the device cursor.
                     if self._is_speaking and time.time() >= self._play_cursor:
+                        if self._response_audio_open:
+                            # O áudio acabou no meio da resposta: buraco audível.
+                            self._voice_diag.gap_started(self._play_cursor)
                         self.set_speaking(False)
                     if (self._turn_done_event and self._turn_done_event.is_set()
                             and self.audio_in_queue.empty() and not self._is_speaking):
@@ -1757,6 +1833,7 @@ class JarvisLive:
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
                 # Cap at ~200 ms so interrupt() still stops audio within ~200 ms.
+                self._voice_diag.gap_ended(time.time())
                 batch = bytearray(chunk)
                 while len(batch) < 9600:   # 9600 bytes ≈ 200 ms at 24 kHz / 16-bit mono
                     try:

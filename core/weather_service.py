@@ -32,6 +32,7 @@ log = logging.getLogger("chloe.weather")
 USER_AGENT = "CHLOE-AI/1.0 (desktop assistant)"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 # Código WMO → (descrição em PT-BR, tipo de ícone)
 WMO: dict[int, tuple[str, str]] = {
@@ -196,6 +197,47 @@ def fetch_weather(loc: Location) -> WeatherData:
         aqi=aqi,
         updated_at=datetime.now(),
     )
+
+
+@dataclass(frozen=True)
+class DailyForecast:
+    date: str                    # AAAA-MM-DD, no fuso da cidade
+    weather_code: int
+    temp_max: float
+    temp_min: float
+    rain_chance: Optional[int]   # % máxima do dia
+
+    @property
+    def condition(self) -> str:
+        return WMO.get(self.weather_code, ("Condição desconhecida", "cloudy"))[0]
+
+
+def geocode(name: str) -> Location:
+    """Cidade pelo nome (Open-Meteo Geocoding, sem chave). Levanta LookupError se não achar."""
+    q = urllib.parse.urlencode({"name": name.strip(), "count": 1, "language": "pt", "format": "json"})
+    results = _get_json(f"{GEOCODING_URL}?{q}").get("results") or []
+    if not results:
+        raise LookupError(f"cidade não encontrada: {name}")
+    r = results[0]
+    return Location(city=r.get("name", name), region=r.get("admin1", ""), country=r.get("country_code", ""),
+                    latitude=float(r["latitude"]), longitude=float(r["longitude"]))
+
+
+def fetch_daily(loc: Location, days: int = 2) -> list[DailyForecast]:
+    """Hoje (índice 0), amanhã (1)… com máxima, mínima e chance de chuva."""
+    q = urllib.parse.urlencode({
+        "latitude": f"{loc.latitude:.4f}",
+        "longitude": f"{loc.longitude:.4f}",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "forecast_days": max(1, min(7, days)),
+        "timezone": "auto",
+    })
+    d = _get_json(f"{FORECAST_URL}?{q}")["daily"]
+    rain = d.get("precipitation_probability_max") or [None] * len(d["time"])
+    return [DailyForecast(date=t, weather_code=int(c), temp_max=float(hi), temp_min=float(lo),
+                          rain_chance=int(p) if p is not None else None)
+            for t, c, hi, lo, p in zip(d["time"], d["weather_code"], d["temperature_2m_max"],
+                                       d["temperature_2m_min"], rain)]
 
 
 # ── Serviço em segundo plano ─────────────────────────────────────────────────
