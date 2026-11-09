@@ -107,14 +107,24 @@ class IslandOrbTests(unittest.TestCase):
         QTest.qWait(80)
         self.assertEqual(orb.mode, "rest")
 
-    def test_voice_received_while_hidden_does_not_turn_it_blue_on_show(self):
+    def test_old_voice_received_while_hidden_does_not_turn_it_blue_on_show(self):
         orb = ParticleOrb(48)
         self.addCleanup(orb.deleteLater)
         orb.set_state("listening")
         orb.set_level(0.9)                         # chegou com a Ilha recolhida
+        QTest.qWait(1200)                          # ... e já passou
         orb.show()
-        QTest.qWait(80)
+        QTest.qWait(40)
         self.assertEqual(orb.mode, "rest")
+
+    def test_mode_is_known_and_announced_even_while_hidden(self):
+        orb = ParticleOrb(24)                      # nunca mostrada (capa da música no lugar)
+        self.addCleanup(orb.deleteLater)
+        seen = []
+        orb.mode_changed.connect(seen.append)
+        orb.set_state("speaking")
+        orb.set_state("thinking")
+        self.assertEqual(seen, ["speak", "think"])
 
     def test_set_level_ignores_garbage(self):
         orb = ParticleOrb(24)

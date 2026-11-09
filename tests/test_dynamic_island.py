@@ -121,7 +121,37 @@ class IslandWidgetTests(unittest.TestCase):
 
     def test_unknown_state_falls_back_to_listening(self):
         self.island.set_assistant_state("algo-novo")
+        self.assertEqual(self.island._state, "listening")
+        self.assertEqual(self.island.assistant.status.text(), "PRONTA")   # ninguém falando
+
+    def test_status_and_pill_follow_who_is_talking(self):
+        self.island.show()
+        self.island.set_assistant_state("listening")
+        self.island.set_voice_level(0.9)                    # você falando
+        QTest.qWait(120)
         self.assertEqual(self.island.assistant.status.text(), "OUVINDO")
+        self.assertEqual(self.island.compact.label.full_text(), "Ouvindo…")
+        self.island.set_assistant_state("speaking")
+        QTest.qWait(60)
+        self.assertEqual(self.island.assistant.status.text(), "FALANDO")
+        self.assertEqual(self.island.compact.label.full_text(), "Respondendo")
+        self.island.set_assistant_state("thinking")
+        QTest.qWait(60)
+        self.assertEqual(self.island.compact.label.full_text(), "Pensando…")
+        self.island.set_assistant_state("muted")
+        QTest.qWait(60)
+        self.assertEqual(self.island.assistant.status.text(), "MUDO")
+        self.assertEqual(self.island.compact.showing, "idle")
+
+    def test_pill_shows_media_when_nobody_is_talking_and_voice_wins_over_media(self):
+        self.island.update_media(_media(playing=True, title="Blinding Lights"))
+        self.assertEqual(self.island.compact.showing, "media")
+        self.assertEqual(self.island.compact.label.full_text(), "Blinding Lights")
+        self.island.set_assistant_state("speaking")         # a CHLOE começou a falar
+        self.assertEqual(self.island.compact.showing, "voice")
+        self.island.set_assistant_state("listening")
+        QTest.qWait(450)                                    # passa o "azul entre palavras"
+        self.assertEqual(self.island.compact.showing, "media")
 
     def test_weather_floor_renders_data(self):
         loc = Location("São Paulo", "São Paulo", "BR", -23.5, -46.6)

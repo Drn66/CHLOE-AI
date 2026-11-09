@@ -71,6 +71,7 @@ from PyQt6.QtWidgets import (
 )
 
 from frontend.particle_core import ParticleOrb
+from frontend.theme import FONT_FAMILIES, LISTEN_COLOR, REST_COLOR, SPEAK_COLOR, THINK_COLOR
 
 if TYPE_CHECKING:  # apenas para dicas de tipo; a ilha não depende dos serviços
     from core.media_service import MediaInfo
@@ -81,33 +82,42 @@ if TYPE_CHECKING:  # apenas para dicas de tipo; a ilha não depende dos serviço
 #  Tokens de design (os mesmos do canvas de especificação)
 # ════════════════════════════════════════════════════════════════════════════
 class T:
-    BG = QColor(10, 10, 12, 235)          # #0A0A0C @ 92%
-    BORDER = QColor(255, 255, 255, 20)    # branco @ 8%
-    TEXT = "#F4F4F6"
+    BG = QColor(0, 0, 0)                  # pílula preta pura
+    BORDER = QColor(255, 255, 255, 15)    # contorno 6%
+    TEXT = "#F5F5F7"
     TEXT_2 = "#A1A1AA"
     TEXT_3 = "#8B8B95"
-    SOFT = "#E4E4E7"
-    CYAN = "#22D3EE"
+    SOFT = "#E4E4EA"
+    ACCENT = LISTEN_COLOR                 # ouvindo / destaque
+    CYAN = LISTEN_COLOR                   # nome antigo do destaque
+    PINK = SPEAK_COLOR                    # falando
+    PURPLE = THINK_COLOR                  # pensando
+    GREY = REST_COLOR                     # repouso
     BLUE = "#2563EB"
-    RED = "#FB7185"
-    GREEN = "#34D399"
-    SKY = "#38BDF8"
-    AMBER = "#FBBF24"
+    RED = "#FF6961"
+    GREEN = "#30D158"
+    SKY = LISTEN_COLOR
+    AMBER = "#FFD60A"
 
-    COMPACT = QSize(210, 36)
-    EXPANDED = QSize(440, 130)
+    COMPACT = QSize(220, 38)
+    EXPANDED = QSize(460, 152)
     TOP_MARGIN = 10
-    MAX_RADIUS = 28
-    RAIL_W = 40                           # trilho direito (⤢ + pontos)
+    MAX_RADIUS = 36
+    RAIL_W = 44                           # trilho direito (⤢ + pontos), com a margem
 
-    EXPAND_MS = 240
-    COLLAPSE_MS = 220
+    EXPAND_MS = 380                       # mola suave, saída cúbica
+    COLLAPSE_MS = 300
     LEAVE_GRACE_MS = 400
-    SLIDE_MS = 280
+    SLIDE_MS = 260
     WHEEL_LOCK_MS = 320
 
 
-UI_FAMILIES = ["Segoe UI Variable Text", "Segoe UI", "Inter", "Arial"]
+def rgba(color: str, alpha: int) -> str:
+    c = QColor(color)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+
+
+UI_FAMILIES = FONT_FAMILIES + ["Arial"]
 ICON_FAMILIES = ["Segoe Fluent Icons", "Segoe MDL2 Assets"]
 EMOJI_FAMILIES = ["Segoe UI Variable Text", "Segoe UI", "Segoe UI Emoji"]
 
@@ -162,9 +172,15 @@ def icon_button(glyph: str, size: int, kind: str = "ghost", tooltip: str = "") -
     r = size // 2
     if kind == "solid":
         b.setStyleSheet(
-            f"QPushButton {{ background: #F4F4F6; color: #0A0A0C; border: none; border-radius: {r}px; }}"
+            f"QPushButton {{ background: #F5F5F7; color: #000000; border: none; border-radius: {r}px; }}"
             f"QPushButton:hover {{ background: #FFFFFF; }}"
             f"QPushButton:pressed {{ background: #D4D4D8; }}"
+        )
+    elif kind == "glass":
+        b.setStyleSheet(
+            f"QPushButton {{ background: rgba(255,255,255,26); color: {T.TEXT}; border: none; border-radius: {r}px; }}"
+            f"QPushButton:hover {{ background: rgba(255,255,255,46); }}"
+            f"QPushButton:pressed {{ background: rgba(255,255,255,66); }}"
         )
     else:
         radius = r if kind == "ghost" else 8
@@ -230,9 +246,9 @@ class _Win32:
 #  Widgets de pintura
 # ════════════════════════════════════════════════════════════════════════════
 class Equalizer(QWidget):
-    """Micro-equalizador de 4 barras verdes/azuis; congela quando pausado."""
+    """Micro-equalizador de 4 barras brancas; congela quando pausado."""
 
-    COLORS = [QColor(T.GREEN), QColor(T.SKY), QColor(T.GREEN), QColor(T.SKY)]
+    COLORS = [QColor(T.TEXT)] * 4
     PHASES = [0.20, 0.55, 0.10, 0.70]
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -271,6 +287,149 @@ class Equalizer(QWidget):
             h = H * (0.3 + 0.7 * k) if self._playing else H * 0.25
             p.setBrush(col)
             p.drawRoundedRect(QRectF(i * 5, H - h, 3, h), 1.5, 1.5)
+
+
+class _Animated(QWidget):
+    """Base: relógio de 40 ms que só roda enquanto o widget está visível."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._t = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+
+    def showEvent(self, e):  # noqa: N802
+        self._timer.start()
+        super().showEvent(e)
+
+    def hideEvent(self, e):  # noqa: N802
+        self._timer.stop()
+        super().hideEvent(e)
+
+    def _tick(self) -> None:
+        self._t += 0.04
+        self.update()
+
+
+class VoiceWave(_Animated):
+    """Onda de 6 barras finas na cor de quem fala (azul: você; rosa: a CHLOE)."""
+
+    PHASES = [0.0, 0.35, 0.8, 0.15, 0.6, 0.95]
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(22, 16)
+        self._color = QColor(T.ACCENT)
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._color)
+        H = self.height()
+        for i, ph in enumerate(self.PHASES):
+            k = 0.5 + 0.5 * math.sin(2 * math.pi * (self._t / 0.7 + ph))
+            h = H * (0.3 + 0.7 * k)
+            p.drawRoundedRect(QRectF(i * 4, (H - h) / 2, 2, h), 1, 1)
+
+
+class ThinkingDots(_Animated):
+    """Três pontos roxos que acendem em sequência."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(20, 16)
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(3):
+            k = 0.5 + 0.5 * math.sin(2 * math.pi * (self._t / 1.1 - i * 0.18))
+            c = QColor(T.PURPLE)
+            c.setAlphaF(0.3 + 0.7 * k)
+            p.setBrush(c)
+            p.drawEllipse(QPointF(4 + i * 6, self.height() / 2), 2, 2)
+
+
+class IconChip(QWidget):
+    """Pílula com ícone vetorial + texto (umidade, vento, UV, qualidade do ar)."""
+
+    H = 30
+
+    def __init__(self, kind: str, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self._text = ""
+        self._font = ui_font(13, QFont.Weight.Medium)
+        self.setFixedHeight(self.H)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str, kind: Optional[str] = None) -> None:  # noqa: N802
+        self._text = text
+        if kind:
+            self._kind = kind
+        self.setAccessibleName(text)
+        self.setFixedWidth(12 + 14 + 6 + QFontMetrics(self._font).horizontalAdvance(text) + 12)
+        self.update()
+
+    def _icon(self, p: QPainter, r: QRectF) -> None:
+        c = r.center()
+        s = r.width()
+        if self._kind == "drop":
+            path = QPainterPath()
+            path.moveTo(c.x(), r.top() + s * 0.05)
+            path.cubicTo(c.x() + s * 0.45, r.top() + s * 0.5, c.x() + s * 0.4, r.bottom(), c.x(), r.bottom())
+            path.cubicTo(c.x() - s * 0.4, r.bottom(), c.x() - s * 0.45, r.top() + s * 0.5, c.x(), r.top() + s * 0.05)
+            p.setPen(round_pen(QColor(T.ACCENT), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        elif self._kind == "wind":
+            p.setPen(round_pen(QColor(T.TEXT), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for y, w in ((0.32, 0.72), (0.62, 0.92)):
+                path = QPainterPath()
+                path.moveTo(r.left(), r.top() + s * y)
+                path.lineTo(r.left() + s * w - s * 0.16, r.top() + s * y)
+                path.arcTo(QRectF(r.left() + s * w - s * 0.32, r.top() + s * y - s * 0.32, s * 0.32, s * 0.32),
+                           -90, 270)
+                p.drawPath(path)
+        elif self._kind == "leaf":
+            p.setPen(round_pen(QColor(T.GREEN), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            path = QPainterPath()
+            path.moveTo(r.left() + s * 0.1, r.bottom() - s * 0.1)
+            path.cubicTo(r.left(), r.top(), r.right(), r.top(), r.right() - s * 0.05, r.top() + s * 0.05)
+            path.cubicTo(r.right(), r.bottom(), r.left(), r.bottom(), r.left() + s * 0.1, r.bottom() - s * 0.1)
+            p.drawPath(path)
+        else:  # uv: sol
+            p.setPen(round_pen(QColor(T.AMBER), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(c, s * 0.2, s * 0.2)
+            for i in range(8):
+                a = i * math.pi / 4
+                p.drawLine(QPointF(c.x() + math.cos(a) * s * 0.34, c.y() + math.sin(a) * s * 0.34),
+                           QPointF(c.x() + math.cos(a) * s * 0.48, c.y() + math.sin(a) * s * 0.48))
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 20))
+        p.drawRoundedRect(QRectF(self.rect()), self.H / 2, self.H / 2)
+        self._icon(p, QRectF(12, (self.H - 13) / 2, 13, 13))
+        p.setFont(self._font)
+        p.setPen(QColor(T.TEXT))
+        p.drawText(QRectF(32, 0, self.width() - 32, self.H),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
 
 
 class CoverArt(QWidget):
@@ -416,18 +575,18 @@ class ThinProgress(QWidget):
         p.setBrush(QColor(255, 255, 255, 31))
         p.drawRoundedRect(r, 2, 2)
         if self._value > 0:
-            p.setBrush(QColor(T.CYAN))
+            p.setBrush(QColor(T.TEXT))
             p.drawRoundedRect(QRectF(r.x(), r.y(), max(4.0, r.width() * self._value), r.height()), 2, 2)
 
 
 class PageDots(QWidget):
-    """Paginação vertical discreta: o ponto ativo vira um traço ciano."""
+    """Paginação vertical discreta: o ponto ativo vira um traço branco."""
 
     def __init__(self, count: int = 3, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._count = count
         self._index = 0
-        self.setFixedSize(6, 14 + (count - 1) * 4 + (count - 1) * 5)
+        self.setFixedSize(5, 16 + (count - 1) * 5 + (count - 1) * 5)
 
     def set_index(self, index: int) -> None:
         self._index = index
@@ -441,9 +600,9 @@ class PageDots(QWidget):
         y = 0.0
         for i in range(self._count):
             active = i == self._index
-            h = 14 if active else 4
-            p.setBrush(QColor(T.CYAN) if active else QColor(255, 255, 255, 72))
-            p.drawRoundedRect(QRectF(1, y, 4, h), 2, 2)
+            h = 16 if active else 5
+            p.setBrush(QColor(T.TEXT) if active else QColor(255, 255, 255, 77))
+            p.drawRoundedRect(QRectF(0, y, 5, h), 2.5, 2.5)
             y += h + 5
 
 
@@ -636,61 +795,81 @@ class VerticalSlideStack(QStackedWidget):
 #  Estado compacto
 # ════════════════════════════════════════════════════════════════════════════
 class CompactView(QWidget):
+    """Pílula: o que importa agora. Voz (ouvindo / respondendo / pensando) vem
+    primeiro; senão a mídia tocando; senão a esfera em repouso + relógio."""
+
+    VOICE = {"listen": ("Ouvindo…", T.ACCENT), "speak": ("Respondendo", T.PINK),
+             "think": ("Pensando…", T.PURPLE)}
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 0, 14, 0)
+        lay.setSpacing(10)
 
-        # — repouso: orbe + "Chloe" + relógio
-        self.idle = QWidget(self)
-        il = QHBoxLayout(self.idle)
-        il.setContentsMargins(6, 0, 14, 0)
-        il.setSpacing(4)
         self.orb = ParticleOrb(24)
-        il.addWidget(self.orb)
-        il.addWidget(make_label("Chloe", 12, T.SOFT, QFont.Weight.Medium))
-        il.addStretch(1)
+        self.cover = CoverArt(24, 7)
+        self.label = ElidedLabel("Chloe", 13, T.TEXT, QFont.Weight.DemiBold)
         self.clock = make_label("", 13, T.TEXT, QFont.Weight.DemiBold)
-        il.addWidget(self.clock)
-
-        # — mídia ativa: capa circular + artista + equalizador
-        self.media = QWidget(self)
-        ml = QHBoxLayout(self.media)
-        ml.setContentsMargins(6, 0, 14, 0)
-        ml.setSpacing(8)
-        self.cover = CoverArt(24, 12)
-        ml.addWidget(self.cover)
-        self.artist = make_label("", 12, T.TEXT_2)
-        ml.addWidget(self.artist)
-        ml.addStretch(1)
         self.eq = Equalizer()
-        ml.addWidget(self.eq)
+        self.wave = VoiceWave()
+        self.dots = ThinkingDots()
+        lay.addWidget(self.orb)
+        lay.addWidget(self.cover)
+        lay.addWidget(self.label, 1)
+        for w in (self.clock, self.eq, self.wave, self.dots):
+            lay.addWidget(w)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.idle)
-        lay.addWidget(self.media)
-        self.media.hide()
+        self._media: Optional["MediaInfo"] = None
+        self.orb.mode_changed.connect(lambda _mode: self._refresh())
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._update_clock)
         self._clock_timer.start(1000)
         self._update_clock()
+        self._refresh()
 
     def _update_clock(self) -> None:
         self.clock.setText(QTime.currentTime().toString("HH:mm"))
 
     def set_media(self, info: Optional["MediaInfo"]) -> None:
-        active = info is not None and info.is_playing
-        self.idle.setVisible(not active)
-        self.media.setVisible(active)
-        if active:
+        self._media = info
+        if info is not None and info.is_playing:
             self.cover.set_image(info.thumbnail)
-            fm = self.artist.fontMetrics()
-            self.artist.setText(fm.elidedText(info.artist or info.source_name, Qt.TextElideMode.ElideRight, 110))
-            self.eq.set_playing(True)
+        self._refresh()
 
     def set_state(self, state: str) -> None:
         self.orb.set_state(state)
+        self._refresh()
+
+    @property
+    def showing(self) -> str:
+        """"voice", "media" ou "idle" — o que a pílula mostra agora."""
+        if self.orb.mode in self.VOICE:
+            return "voice"
+        if self._media is not None and self._media.is_playing:
+            return "media"
+        return "idle"
+
+    def _refresh(self) -> None:
+        showing, mode = self.showing, self.orb.mode
+        self.orb.setVisible(showing != "media")
+        self.cover.setVisible(showing == "media")
+        self.clock.setVisible(showing == "idle")
+        self.eq.setVisible(showing == "media")
+        self.wave.setVisible(mode in ("listen", "speak"))
+        self.dots.setVisible(mode == "think")
+        if showing == "voice":
+            text, color = self.VOICE[mode]
+            self.wave.set_color(color)
+        elif showing == "media":
+            text, color = (self._media.title or self._media.artist or self._media.source_name), T.TEXT
+            self.eq.set_playing(True)
+        else:
+            text, color = "Chloe", T.TEXT
+        self.label.set_full_text(text)
+        self.label.setStyleSheet(f"color: {color}; background: transparent;")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -720,57 +899,65 @@ class AssistantFloor(QWidget):
     message_submitted = pyqtSignal(str)
     mic_clicked = pyqtSignal()
 
+    # estado → (selo quando o estado manda, botão do microfone: "on" | "muted" | "off")
     MIC = {
-        #              cor        rgb fundo         rótulo        glifo
-        "listening": (T.CYAN, (34, 211, 238), "Ouvindo", Glyph.MIC),
-        "muted": (T.RED, (244, 63, 94), "Mutado", Glyph.MIC_OFF),
-        "speaking": (T.GREEN, (52, 211, 153), "Falando", Glyph.MIC),
-        "thinking": ("#60A5FA", (96, 165, 250), "Pensando", Glyph.MIC),
-        "sleeping": (T.TEXT_2, (161, 161, 170), "Repouso", Glyph.MIC),
-        "offline": (T.TEXT_2, (161, 161, 170), "Offline", Glyph.MIC_OFF),
-        "connecting": (T.TEXT_2, (161, 161, 170), "Conectando", Glyph.MIC_OFF),
-        "unavailable": (T.TEXT_2, (161, 161, 170), "Sem mic", Glyph.MIC_OFF),
+        "listening": (None, "on"),
+        "muted": (("Mudo", T.RED), "muted"),
+        "speaking": (None, "on"),
+        "thinking": (None, "on"),
+        "sleeping": (("Repouso", T.GREY), "on"),
+        "offline": (("Offline", T.GREY), "off"),
+        "connecting": (("Conectando", T.GREY), "off"),
+        "unavailable": (("Sem microfone", T.GREY), "off"),
     }
+    # modo da esfera → selo (quem está falando)
+    VOICE = {"listen": ("Ouvindo", T.ACCENT), "speak": ("Falando", T.PINK), "think": ("Pensando", T.PURPLE)}
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._full_response = ""
+        self._state = "listening"
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(10, 12, T.RAIL_W + 4, 14)
-        root.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, T.RAIL_W, 18)
+        root.setSpacing(0)
 
-        left = QVBoxLayout()
-        left.setSpacing(0)
-        left.addStretch(1)
-        self.orb = ParticleOrb(52)
-        left.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.status = make_label("OUVINDO", 10, T.CYAN, QFont.Weight.DemiBold)
-        f = self.status.font()
-        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        self.orb = ParticleOrb(48)
+        top.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignTop)
+
+        texts = QVBoxLayout()
+        texts.setSpacing(3)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(make_label("Chloe", 12, T.TEXT_2, QFont.Weight.DemiBold))
+        self.status = QLabel("")
+        f = ui_font(10, QFont.Weight.Bold)
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
         self.status.setFont(f)
-        left.addWidget(self.status, 0, Qt.AlignmentFlag.AlignHCenter)
-        left.addStretch(1)
-        root.addLayout(left)
-
-        right = QVBoxLayout()
-        right.setSpacing(8)
-        self.response = make_label("", 13, T.SOFT)
+        self.status.setFixedHeight(18)
+        head.addWidget(self.status)
+        head.addStretch(1)
+        texts.addLayout(head)
+        self.response = make_label("", 15, T.TEXT)
         self.response.setWordWrap(True)
-        self.response.setFixedHeight(36)
+        self.response.setFixedHeight(42)
         self.response.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.response.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        right.addWidget(self.response)
-        right.addStretch(1)
+        texts.addWidget(self.response)
+        top.addLayout(texts, 1)
+        root.addLayout(top)
+        root.addStretch(1)
 
         row = QHBoxLayout()
         row.setSpacing(8)
         self.input = FocusLineEdit()
         self.input.setObjectName("chloeAsk")
-        self.input.setPlaceholderText("Pergunte algo à Chloe...")
+        self.input.setPlaceholderText("Pergunte algo à Chloe…")
         self.input.setAccessibleName("Pergunte algo à Chloe")
-        self.input.setFont(ui_font(13))
-        self.input.setFixedHeight(34)
+        self.input.setFont(ui_font(14))
+        self.input.setFixedHeight(40)
         pal = self.input.palette()
         pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(T.TEXT_3))
         pal.setColor(QPalette.ColorRole.Text, QColor(T.TEXT))
@@ -779,15 +966,15 @@ class AssistantFloor(QWidget):
         row.addWidget(self.input, 1)
 
         self.mic = QPushButton()
-        self.mic.setFixedSize(34, 34)
-        self.mic.setFont(icon_font(15))
+        self.mic.setFixedSize(40, 40)
+        self.mic.setFont(icon_font(16))
         self.mic.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mic.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.mic.clicked.connect(self.mic_clicked)
         row.addWidget(self.mic)
-        right.addLayout(row)
-        root.addLayout(right, 1)
+        root.addLayout(row)
 
+        self.orb.mode_changed.connect(lambda _mode: self._refresh_status())
         self.set_mic_state("listening")
         self.set_response("Olá! Passe o mouse aqui quando precisar de mim.")
 
@@ -812,101 +999,125 @@ class AssistantFloor(QWidget):
         self._elide()
 
     def set_mic_state(self, state: str) -> None:
-        color, (r, g, b), label, glyph = self.MIC.get(state, self.MIC["listening"])
+        self._state = state if state in self.MIC else "listening"
+        _, mic = self.MIC[self._state]
+        if mic == "on":
+            glyph, bg, fg, hover = Glyph.MIC, T.ACCENT, "#001A26", "#8FDFFF"
+            tip = "Microfone ativo — clique para silenciar"
+        elif mic == "muted":
+            glyph, bg, fg, hover = Glyph.MIC_OFF, rgba(T.RED, 46), T.RED, rgba(T.RED, 72)
+            tip = "Microfone mutado — clique para ativar"
+        else:
+            glyph, bg, fg, hover = Glyph.MIC_OFF, "rgba(255,255,255,20)", T.TEXT_2, "rgba(255,255,255,36)"
+            tip = "Microfone indisponível agora"
         self.mic.setText(glyph)
-        self.mic.setToolTip("Microfone mutado — clique para ativar" if state == "muted"
-                            else "Microfone ativo — clique para silenciar")
-        self.mic.setAccessibleName(self.mic.toolTip())
+        self.mic.setToolTip(tip)
+        self.mic.setAccessibleName(tip)
         self.mic.setStyleSheet(
-            f"QPushButton {{ background: rgba({r},{g},{b},38); color: {color}; border: none; border-radius: 10px; }}"
-            f"QPushButton:hover {{ background: rgba({r},{g},{b},64); }}"
-            f"QPushButton:pressed {{ background: rgba({r},{g},{b},90); }}"
+            f"QPushButton {{ background: {bg}; color: {fg}; border: none; border-radius: 20px; }}"
+            f"QPushButton:hover {{ background: {hover}; }}"
         )
-        self.status.setText(label.upper())
-        self.status.setStyleSheet(f"color: {color}; background: transparent;")
-        self.orb.set_state(state)
+        self.orb.set_state(self._state)
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        chip, _ = self.MIC[self._state]
+        if chip is None:
+            chip = self.VOICE.get(self.orb.mode, ("Pronta", T.TEXT_2))
+        text, color = chip
+        self.status.setText(text.upper())
+        self.status.setStyleSheet(
+            f"color: {color}; background: {rgba(color, 36)}; border-radius: 9px; padding: 0 7px;"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Andar 2 — Clima
 # ════════════════════════════════════════════════════════════════════════════
+class PinIcon(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(12, 14)
+
+    def paintEvent(self, _):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(round_pen(QColor(T.TEXT_2), 1.4))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath()
+        path.moveTo(6, 13)
+        path.cubicTo(1, 8.5, 1, 6, 1, 5.5)
+        path.arcTo(QRectF(1, 0.8, 10, 10), 180, -180)
+        path.cubicTo(11, 6, 11, 8.5, 6, 13)
+        p.drawPath(path)
+        p.drawEllipse(QPointF(6, 5.8), 1.8, 1.8)
+
+
 class WeatherFloor(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 14, T.RAIL_W + 4, 14)
+        root.setContentsMargins(22, 18, T.RAIL_W, 18)
         root.setSpacing(0)
 
         top = QHBoxLayout()
-        top.setSpacing(12)
-        self.icon = WeatherIcon(46)
+        top.setSpacing(14)
+        self.icon = WeatherIcon(44)
         top.addWidget(self.icon)
-
-        temp_box = QHBoxLayout()
-        temp_box.setSpacing(1)
-        self.temp = make_label("--°", 40, T.TEXT, QFont.Weight.DemiBold)
+        self.temp = make_label("--°", 44, T.TEXT, QFont.Weight.Light)
         tf = self.temp.font()
         tf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -1.5)
         self.temp.setFont(tf)
-        unit = make_label("C", 16, T.TEXT_2, QFont.Weight.Medium)
-        unit.setAlignment(Qt.AlignmentFlag.AlignTop)
-        temp_box.addWidget(self.temp, 0, Qt.AlignmentFlag.AlignTop)
-        temp_box.addWidget(unit, 0, Qt.AlignmentFlag.AlignTop)
-        top.addLayout(temp_box)
+        top.addWidget(self.temp)
 
-        top.addWidget(vline())
         info = QVBoxLayout()
-        info.setSpacing(2)
-        city_row = QHBoxLayout()
-        city_row.setSpacing(5)
-        pin = QLabel(Glyph.PIN)
-        pin.setFont(icon_font(12))
-        pin.setStyleSheet(f"color: {T.CYAN}; background: transparent;")
-        city_row.addWidget(pin)
-        self.city = ElidedLabel("Detectando local…", 14, T.TEXT, QFont.Weight.DemiBold)
-        city_row.addWidget(self.city, 1)
-        info.addLayout(city_row)
-        self.condition = make_label("", 12, T.TEXT_2)
-        self.feels = make_label("", 12, T.TEXT_3)
+        info.setSpacing(3)
+        info.addStretch(1)
+        self.condition = ElidedLabel("Buscando o tempo…", 15, T.TEXT, QFont.Weight.DemiBold)
         info.addWidget(self.condition)
-        info.addWidget(self.feels)
+        where = QHBoxLayout()
+        where.setSpacing(4)
+        where.addWidget(PinIcon(), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.city = ElidedLabel("", 13, T.TEXT_2)
+        where.addWidget(self.city, 1)
+        self.feels = make_label("", 13, T.TEXT_2)
+        where.addWidget(self.feels)
+        where.addStretch(0)
+        self._set_city("Detectando local…")
+        info.addLayout(where)
+        info.addStretch(1)
         top.addLayout(info, 1)
         root.addLayout(top)
         root.addStretch(1)
 
         chips = QHBoxLayout()
-        chips.setSpacing(6)
-        self.chip_humidity = self._chip("💧 --%")
-        self.chip_wind = self._chip("💨 -- km/h")
-        self.chip_extra = self._chip("☀️ UV --")
+        chips.setSpacing(8)
+        self.chip_humidity = IconChip("drop", "--%")
+        self.chip_wind = IconChip("wind", "-- km/h")
+        self.chip_extra = IconChip("uv", "UV --")
         for c in (self.chip_humidity, self.chip_wind, self.chip_extra):
             chips.addWidget(c)
         chips.addStretch(1)
         root.addLayout(chips)
 
-    @staticmethod
-    def _chip(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFont(ui_font(12, families=EMOJI_FAMILIES))
-        lbl.setFixedHeight(26)
-        lbl.setStyleSheet(
-            f"QLabel {{ background: rgba(255,255,255,15); border-radius: 13px; padding: 0 10px; color: {T.SOFT}; }}"
-        )
-        return lbl
+    def _set_city(self, text: str) -> None:
+        # Só a largura do nome: a sensação térmica vem logo depois, não no canto.
+        self.city.set_full_text(text)
+        self.city.setMaximumWidth(self.city.fontMetrics().horizontalAdvance(text) + 4)
 
     def set_weather(self, data: "WeatherData") -> None:
         self.icon.set_condition(data.kind, data.is_day)
         self.temp.setText(f"{round(data.temperature)}°")
-        self.city.set_full_text(data.location.label)
-        self.condition.setText(data.condition)
-        self.feels.setText(f"Sensação térmica {round(data.apparent_temperature)}°C")
-        self.chip_humidity.setText(f"💧 {round(data.humidity)}%")
-        self.chip_wind.setText(f"💨 {round(data.wind_speed)} km/h")
+        self._set_city(data.location.label)
+        self.condition.set_full_text(data.condition)
+        self.feels.setText(f"· sensação {round(data.apparent_temperature)}°")
+        self.chip_humidity.setText(f"{round(data.humidity)}%")
+        self.chip_wind.setText(f"{round(data.wind_speed)} km/h")
         if data.uv_index is not None:
-            self.chip_extra.setText(f"☀️ UV {round(data.uv_index)} · {data.uv_label}")
+            self.chip_extra.setText(f"UV {round(data.uv_index)} · {data.uv_label}", "uv")
             self.chip_extra.show()
         elif data.aqi is not None:
-            self.chip_extra.setText(f"🍃 Ar {data.aqi} · {data.aqi_label}")
+            self.chip_extra.setText(f"Ar {data.aqi} · {data.aqi_label}", "leaf")
             self.chip_extra.show()
         else:
             self.chip_extra.hide()
@@ -921,7 +1132,7 @@ class MediaFloor(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, T.RAIL_W + 4, 14)
+        outer.setContentsMargins(18, 18, T.RAIL_W, 18)
         outer.setSpacing(0)
 
         # — conteúdo com mídia
@@ -931,14 +1142,14 @@ class MediaFloor(QWidget):
         root.setSpacing(0)
 
         top = QHBoxLayout()
-        top.setSpacing(12)
-        self.cover = CoverArt(48, 10)
+        top.setSpacing(14)
+        self.cover = CoverArt(60, 14)
         top.addWidget(self.cover)
         texts = QVBoxLayout()
         texts.setSpacing(3)
         texts.addStretch(1)
-        self.title = MarqueeLabel(ui_font(14, QFont.Weight.DemiBold), T.TEXT)
-        self.artist = ElidedLabel("", 12, T.TEXT_2)
+        self.title = MarqueeLabel(ui_font(16, QFont.Weight.DemiBold), T.TEXT)
+        self.artist = ElidedLabel("", 13, T.TEXT_2)
         texts.addWidget(self.title)
         texts.addWidget(self.artist)
         texts.addStretch(1)
@@ -946,9 +1157,9 @@ class MediaFloor(QWidget):
 
         controls = QHBoxLayout()
         controls.setSpacing(4)
-        self.btn_prev = icon_button(Glyph.PREV, 32, tooltip="Faixa anterior")
-        self.btn_play = icon_button(Glyph.PAUSE, 36, kind="solid", tooltip="Pausar")
-        self.btn_next = icon_button(Glyph.NEXT, 32, tooltip="Próxima faixa")
+        self.btn_prev = icon_button(Glyph.PREV, 36, tooltip="Faixa anterior")
+        self.btn_play = icon_button(Glyph.PAUSE, 44, kind="solid", tooltip="Pausar")
+        self.btn_next = icon_button(Glyph.NEXT, 36, tooltip="Próxima faixa")
         self.btn_prev.clicked.connect(lambda: self.command.emit("previous"))
         self.btn_play.clicked.connect(lambda: self.command.emit("play_pause"))
         self.btn_next.clicked.connect(lambda: self.command.emit("next"))
@@ -960,19 +1171,12 @@ class MediaFloor(QWidget):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(10)
-        self.pos = make_label("0:00", 11, T.TEXT_2)
+        self.pos = make_label("0:00", 11, T.TEXT_2, QFont.Weight.Medium)
         self.bar = ThinProgress()
-        self.rem = make_label("", 11, T.TEXT_2)
-        self.source = QLabel("")
-        self.source.setFont(ui_font(11))
-        self.source.setFixedHeight(22)
-        self.source.setStyleSheet(
-            "QLabel { background: rgba(255,255,255,15); border-radius: 11px; padding: 0 8px; color: #D4D4D8; }"
-        )
+        self.rem = make_label("", 11, T.TEXT_2, QFont.Weight.Medium)
         bottom.addWidget(self.pos)
         bottom.addWidget(self.bar, 1)
         bottom.addWidget(self.rem)
-        bottom.addWidget(self.source)
         root.addLayout(bottom)
         outer.addWidget(self.content)
 
@@ -982,16 +1186,16 @@ class MediaFloor(QWidget):
         el.setContentsMargins(0, 0, 0, 0)
         el.setSpacing(14)
         ph = QLabel(Glyph.MUSIC)
-        ph.setFont(icon_font(20))
-        ph.setFixedSize(48, 48)
+        ph.setFont(icon_font(22))
+        ph.setFixedSize(60, 60)
         ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ph.setStyleSheet(f"background: rgba(255,255,255,15); border-radius: 10px; color: {T.TEXT_3};")
+        ph.setStyleSheet(f"background: rgba(255,255,255,20); border-radius: 14px; color: {T.TEXT_2};")
         el.addWidget(ph)
         txt = QVBoxLayout()
         txt.setSpacing(4)
         txt.addStretch(1)
-        txt.addWidget(make_label("Nada tocando agora", 14, T.TEXT, QFont.Weight.DemiBold))
-        hint = make_label("Abra o Spotify, YouTube ou outro player e ele aparece aqui.", 12, T.TEXT_2)
+        txt.addWidget(make_label("Nada tocando agora", 16, T.TEXT, QFont.Weight.DemiBold))
+        hint = make_label("Abra o Spotify, o YouTube ou outro player e ele aparece aqui.", 13, T.TEXT_2)
         hint.setWordWrap(True)
         txt.addWidget(hint)
         txt.addStretch(1)
@@ -1007,12 +1211,12 @@ class MediaFloor(QWidget):
             return
         self.cover.set_image(info.thumbnail)
         self.title.setText(info.title)
-        self.artist.set_full_text(info.artist or "")
+        who = " · ".join(part for part in (info.artist, info.source_name) if part)
+        self.artist.set_full_text(who)
         self.btn_play.setText(Glyph.PAUSE if info.is_playing else Glyph.PLAY)
         tip = "Pausar" if info.is_playing else "Reproduzir"
         self.btn_play.setToolTip(tip)
         self.btn_play.setAccessibleName(tip)
-        self.source.setText(info.source_name)
         self.pos.setText(fmt_time(info.position))
         if info.duration > 0:
             self.bar.set_value(info.position / info.duration)
@@ -1029,11 +1233,21 @@ class MediaFloor(QWidget):
 ISLAND_QSS = f"""
 QLabel {{ color: {T.TEXT}; background: transparent; }}
 QLineEdit#chloeAsk {{
-    background: rgba(255,255,255,15); border: 1px solid transparent; border-radius: 10px;
-    padding: 0 12px; color: {T.TEXT}; selection-background-color: #0E7490;
+    background: rgba(255,255,255,20); border: 1px solid transparent; border-radius: 20px;
+    padding: 0 16px; color: {T.TEXT}; selection-background-color: {rgba(T.ACCENT, 110)};
 }}
-QLineEdit#chloeAsk:focus {{ border: 1px solid rgba(34,211,238,140); }}
-QToolTip {{ color: {T.TEXT}; background: #1C1D22; border: 1px solid rgba(255,255,255,30); padding: 4px 8px; }}
+QLineEdit#chloeAsk:focus {{ border: 1px solid {rgba(T.ACCENT, 140)}; }}
+QToolTip {{ color: {T.TEXT}; background: #1C1C22; border: 1px solid rgba(255,255,255,30); padding: 4px 8px; }}
+"""
+
+MENU_QSS = f"""
+QMenu {{
+    background: rgba(36,36,44,242); color: {T.TEXT};
+    border: 1px solid rgba(255,255,255,26); border-radius: 16px; padding: 6px;
+}}
+QMenu::item {{ padding: 9px 28px 9px 12px; border-radius: 10px; }}
+QMenu::item:selected {{ background: rgba(255,255,255,26); }}
+QMenu::separator {{ height: 1px; background: rgba(255,255,255,20); margin: 4px 8px; }}
 """
 
 
@@ -1115,12 +1329,13 @@ class DynamicIsland(QWidget):
 
         rail = QWidget(self.floors)
         rail.setGeometry(T.EXPANDED.width() - T.RAIL_W, 0, T.RAIL_W, T.EXPANDED.height())
-        self.btn_restore = icon_button(Glyph.EXPAND, 28, kind="square", tooltip="Abrir janela completa da CHLOE")
-        self.btn_restore.setFont(icon_font(12))
+        self.btn_restore = icon_button(Glyph.EXPAND, 28, kind="glass", tooltip="Abrir janela completa da CHLOE")
+        self.btn_restore.setFont(icon_font(11))
         self.btn_restore.setParent(rail)
-        self.btn_restore.move(6, 8)
+        btn_x = T.RAIL_W - 14 - 28
+        self.btn_restore.move(btn_x, 18)
         self.dots = PageDots(3, rail)
-        self.dots.move((T.RAIL_W - self.dots.width()) // 2, (T.EXPANDED.height() - self.dots.height()) // 2 + 6)
+        self.dots.move(btn_x + (28 - self.dots.width()) // 2, T.EXPANDED.height() - 22 - self.dots.height())
         self.dots.set_index(self._floor)
         self.floors.hide()
 
@@ -1150,7 +1365,7 @@ class DynamicIsland(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = min(r.height() / 2, T.MAX_RADIUS)   # 18 na pílula → 28 expandida
+        radius = min(r.height() / 2, T.MAX_RADIUS)   # 19 na pílula → 36 expandida
         p.setPen(QPen(T.BORDER, 1))
         p.setBrush(T.BG)
         p.drawRoundedRect(r, radius, radius)
@@ -1256,21 +1471,23 @@ class DynamicIsland(QWidget):
 
     def _show_menu(self, pos: QPoint) -> None:
         menu = QMenu(self)
-        menu.setStyleSheet(
-            f"QMenu {{ background: #1C1D22; color: {T.TEXT}; border: 1px solid rgba(255,255,255,30);"
-            " border-radius: 8px; padding: 4px; }"
-            " QMenu::item { padding: 6px 18px; border-radius: 6px; }"
-            " QMenu::item:selected { background: rgba(255,255,255,26); }"
-        )
-        menu.setFont(ui_font(13))
-        menu.addAction("Abrir janela completa", self._on_restore)
+        menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setStyleSheet(MENU_QSS)
+        menu.setFont(ui_font(14, QFont.Weight.Medium))
+        menu.addAction("Abrir janela completa\t⤢", self._on_restore)
+        muted = self._state == "muted"
+        menu.addAction(("Ativar microfone" if muted else "Silenciar microfone") + "\tF4", self._toggle_mic)
         menu.addSeparator()
-        menu.addAction("Encerrar CHLOE", self.quit_requested.emit)
+        quit_action = menu.addAction("Encerrar CHLOE", self.quit_requested.emit)
+        quit_action.setObjectName("quit")
         self._menu_open = True
         self._collapse_timer.stop()
         try:
             menu.exec(self.mapToGlobal(pos))
         finally:
+            menu.deleteLater()        # antes, cada clique direito deixava um QMenu órfão
             self._menu_open = False
             if not self.geometry().contains(QCursor.pos()):
                 self._collapse_timer.start()

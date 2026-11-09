@@ -13,7 +13,7 @@ de estado nunca dá saltos.
 """
 import math
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import QWidget
 
@@ -197,7 +197,13 @@ _ISLAND_TO_HUD = {
 
 class ParticleOrb(QWidget):
     """Esfera de partículas compacta (Ilha). `set_level()` só grava um float:
-    pode ser chamado das threads de áudio, como a HUD."""
+    pode ser chamado das threads de áudio, como a HUD.
+
+    O modo é calculado no relógio (não na pintura), então continua certo mesmo
+    com a esfera escondida — a pílula usa `mode_changed` para trocar o texto.
+    """
+
+    mode_changed = pyqtSignal(str)
 
     def __init__(self, diameter: int, parent=None) -> None:
         super().__init__(parent)
@@ -209,6 +215,7 @@ class ParticleOrb(QWidget):
         self._field = ParticleField(count)
         self._dot_scale = max(0.45, self._d / 320)
         self._state = "listening"
+        self._mode = "rest"
         self._t = 0.0
         self._level = 0.0
         self._target = 0.0
@@ -216,13 +223,15 @@ class ParticleOrb(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._tick)
+        self._timer.start()      # barato: só pinta quando visível
 
     @property
     def mode(self) -> str:
-        return self._field.mode
+        return self._mode
 
     def set_state(self, state: str) -> None:
         self._state = state
+        self._resolve()
         self.update()
 
     def set_level(self, level: float) -> None:
@@ -233,28 +242,27 @@ class ParticleOrb(QWidget):
         if lv > self._target:
             self._target = lv
 
-    def showEvent(self, e):  # noqa: N802
-        # Escondida, a esfera não decai o nível: descarta voz "congelada" de antes.
-        self._level = self._target = 0.0
-        self._timer.start()
-        super().showEvent(e)
-
-    def hideEvent(self, e):  # noqa: N802
-        self._timer.stop()
-        super().hideEvent(e)
-
     def _tick(self) -> None:
+        # O nível decai sempre, visível ou não: voz antiga nunca fica "congelada".
+        # Mesmas constantes de tempo da HUD (0,86 e 0,45 a cada 16 ms), aqui a cada 33 ms.
         self._t += 0.033
-        self._level += (self._target - self._level) * 0.35
-        self._target *= 0.86
-        self.update()
+        self._level += (self._target - self._level) * 0.70
+        self._target *= 0.74
+        self._resolve()
+        if self.isVisible():
+            self.update()
 
-    def paintEvent(self, _):  # noqa: N802
+    def _resolve(self) -> None:
         hud_state, speaking, muted = _ISLAND_TO_HUD.get(self._state, ("SLEEPING", False, False))
         mode = self._field.resolve_mode(self._t, hud_state, speaking, muted, self._level)
+        if mode != self._mode:
+            self._mode = mode
+            self.mode_changed.emit(mode)
+
+    def paintEvent(self, _):  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         c = self._d / 2
-        self._field.draw_sphere(p, c, c, self._d * 0.40, self._t, self._level, mode,
+        self._field.draw_sphere(p, c, c, self._d * 0.40, self._t, self._level, self._mode,
                                 self.reduced_motion, self._dot_scale, glow_scale=1.2)
         p.end()
