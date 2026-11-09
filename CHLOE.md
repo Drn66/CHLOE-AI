@@ -5,7 +5,7 @@ usa uma interface em português, fundo preto, esfera de partículas com reação
 ao áudio e painel de conversa que pode ser ocultado. A integração continua
 utilizando Gemini Live e a chave de API fornecida pelo usuário.
 
-O [readme original](readme.md) foi preservado como referência do projeto de
+O [readme original](docs/README-MARK-LV.md) foi preservado como referência do projeto de
 origem. Algumas descrições visuais ali se referem à interface anterior.
 A [licença original](LICENSE) e a atribuição a FatihMakes também foram mantidas.
 
