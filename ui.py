@@ -4698,6 +4698,8 @@ class MainWindow(QMainWindow):
         self.hud.reduced_motion = not self.hud.reduced_motion
         self._refresh_hud_btn()
         self.hud.update()
+        if getattr(self, "_island", None) is not None:
+            self._island.set_reduced_motion(self.hud.reduced_motion)
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,
@@ -5018,6 +5020,7 @@ class MainWindow(QMainWindow):
             self._island_btn.setToolTip("Ilha Dinâmica indisponível nesta instalação.")
             return
         self._island = island
+        island.set_reduced_motion(self.hud.reduced_motion)
         island.set_response("Olá! Passe o mouse aqui quando precisar de mim.")
         island.message_submitted.connect(self._send_from_island)
         island.mic_toggled.connect(self._on_island_mic)

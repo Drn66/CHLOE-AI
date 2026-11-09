@@ -23,5 +23,12 @@ class C:
     DARK = "#000000"
     BAR_BG = "#202020"
 
-LISTEN_COLOR = "#8ddcff"
+# Esfera de partículas: cinza em repouso, azul com você falando, rosa com a
+# CHLOE falando, roxo pensando (design "CHLOE AI — Design Premium").
+REST_COLOR = "#a1a7b5"
+LISTEN_COLOR = "#64d2ff"
 SPEAK_COLOR = "#f4a1d0"
+THINK_COLOR = "#bf9bff"
+
+# Inter quando instalada; senão a Segoe UI Variable do Windows 11 e a Segoe UI.
+FONT_FAMILIES = ["Inter", "Segoe UI Variable Text", "Segoe UI"]

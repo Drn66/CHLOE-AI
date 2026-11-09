@@ -70,6 +70,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from frontend.particle_core import ParticleOrb
+
 if TYPE_CHECKING:  # apenas para dicas de tipo; a ilha não depende dos serviços
     from core.media_service import MediaInfo
     from core.weather_service import WeatherData
@@ -227,87 +229,6 @@ class _Win32:
 # ════════════════════════════════════════════════════════════════════════════
 #  Widgets de pintura
 # ════════════════════════════════════════════════════════════════════════════
-class OrbWidget(QWidget):
-    """Orbe holográfico reativo. `set_level()` recebe a amplitude da voz (0–1)."""
-
-    GLOW = {
-        "listening": QColor(34, 211, 238),
-        "idle": QColor(34, 211, 238),
-        "speaking": QColor(52, 211, 153),
-        "muted": QColor(251, 113, 133),
-        "thinking": QColor(96, 165, 250),
-        "sleeping": QColor(113, 113, 122),
-        "offline": QColor(113, 113, 122),
-        "connecting": QColor(113, 113, 122),
-        "unavailable": QColor(113, 113, 122),
-    }
-    BODY = {
-        "default": [(0.0, "#A5F3FC"), (0.35, "#22D3EE"), (0.75, "#2563EB"), (1.0, "#1E1B4B")],
-        "muted": [(0.0, "#FECDD3"), (0.35, "#FB7185"), (0.75, "#BE123C"), (1.0, "#4C0519")],
-    }
-
-    def __init__(self, diameter: int, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._d = diameter
-        pad = max(4, int(diameter * 0.3))
-        self.setFixedSize(diameter + 2 * pad, diameter + 2 * pad)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._t = 0.0
-        self._level = 0.0
-        self._target = 0.0
-        self._state = "listening"
-        self._timer = QTimer(self)
-        self._timer.setInterval(33)
-        self._timer.timeout.connect(self._tick)
-
-    def set_state(self, state: str) -> None:
-        self._state = state
-        self.update()
-
-    def set_level(self, level: float) -> None:
-        self._target = max(0.0, min(1.0, float(level)))
-
-    def showEvent(self, e):  # noqa: N802
-        self._timer.start()
-        super().showEvent(e)
-
-    def hideEvent(self, e):  # noqa: N802
-        self._timer.stop()
-        super().hideEvent(e)
-
-    def _tick(self) -> None:
-        self._t += 0.033
-        self._level += (self._target - self._level) * 0.25
-        self._target *= 0.90
-        self.update()
-
-    def paintEvent(self, _):  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        c = QPointF(self.width() / 2, self.height() / 2)
-        pulse = 0.5 + 0.5 * math.sin(self._t * 2 * math.pi / 2.4)
-        r = self._d / 2 * (1 + 0.06 * pulse + 0.14 * self._level)
-
-        glow = QColor(self.GLOW.get(self._state, self.GLOW["listening"]))
-        g = QRadialGradient(c, r * 1.3)
-        inner = QColor(glow)
-        inner.setAlpha(int(60 + 70 * pulse + 100 * self._level))
-        outer = QColor(glow)
-        outer.setAlpha(0)
-        g.setColorAt(0.55, inner)
-        g.setColorAt(1.0, outer)
-        p.setBrush(g)
-        p.drawEllipse(c, r * 1.3, r * 1.3)
-
-        focal = QPointF(c.x() - r * 0.30, c.y() - r * 0.40)
-        body = QRadialGradient(c, r, focal)
-        for pos, col in self.BODY["muted" if self._state == "muted" else "default"]:
-            body.setColorAt(pos, QColor(col))
-        p.setBrush(body)
-        p.drawEllipse(c, r, r)
-
-
 class Equalizer(QWidget):
     """Micro-equalizador de 4 barras verdes/azuis; congela quando pausado."""
 
@@ -724,7 +645,7 @@ class CompactView(QWidget):
         il = QHBoxLayout(self.idle)
         il.setContentsMargins(6, 0, 14, 0)
         il.setSpacing(4)
-        self.orb = OrbWidget(14)
+        self.orb = ParticleOrb(24)
         il.addWidget(self.orb)
         il.addWidget(make_label("Chloe", 12, T.SOFT, QFont.Weight.Medium))
         il.addStretch(1)
@@ -822,7 +743,7 @@ class AssistantFloor(QWidget):
         left = QVBoxLayout()
         left.setSpacing(0)
         left.addStretch(1)
-        self.orb = OrbWidget(40)
+        self.orb = ParticleOrb(52)
         left.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignHCenter)
         self.status = make_label("OUVINDO", 10, T.CYAN, QFont.Weight.DemiBold)
         f = self.status.font()
@@ -903,7 +824,7 @@ class AssistantFloor(QWidget):
         )
         self.status.setText(label.upper())
         self.status.setStyleSheet(f"color: {color}; background: transparent;")
-        self.orb.set_state(state if state in OrbWidget.GLOW else "idle")
+        self.orb.set_state(state)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1451,6 +1372,12 @@ class DynamicIsland(QWidget):
         """Amplitude (0–1) da voz da Chloe ou do usuário, para o orbe reagir."""
         self.assistant.orb.set_level(level)
         self.compact.orb.set_level(level)
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        """Mesma opção "Movimento reduzido" da janela: a esfera para de girar e pulsar."""
+        for orb in (self.assistant.orb, self.compact.orb):
+            orb.reduced_motion = bool(enabled)
+            orb.update()
 
     def update_weather(self, data: "WeatherData") -> None:
         self.weather.set_weather(data)
